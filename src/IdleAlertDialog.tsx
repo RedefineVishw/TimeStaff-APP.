@@ -2,6 +2,8 @@ interface IdleAlertDialogProps {
   idleSeconds: number;
   projectName: string;
   taskName: string;
+  wasWorking: "no" | "yes";
+  onWasWorkingChange: (value: "no" | "yes") => void;
   onStop: () => void;
   onResume: () => void;
   busy: boolean;
@@ -18,6 +20,8 @@ export function IdleAlertDialog({
   idleSeconds,
   projectName,
   taskName,
+  wasWorking,
+  onWasWorkingChange,
   onStop,
   onResume,
   busy,
@@ -32,19 +36,47 @@ export function IdleAlertDialog({
           <p className="idle-amount">{formatIdleLabel(idleSeconds)}</p>
           <div className="idle-context">
             <span>Project: {projectName}</span>
-            <span>Task: {taskName}</span>
+            <span>To-do: {taskName}</span>
           </div>
         </div>
 
-        <p className="idle-footnote">
-          Idle time is discarded from your logged time unless you resume.
-        </p>
+        <div className="idle-question">
+          <p className="idle-question-label">Were you working?</p>
+          <label className="idle-radio">
+            <input
+              type="radio"
+              name="was-working"
+              checked={wasWorking === "no"}
+              onChange={() => onWasWorkingChange("no")}
+            />
+            No, discard idle time
+          </label>
+          <label className="idle-radio">
+            <input
+              type="radio"
+              name="was-working"
+              checked={wasWorking === "yes"}
+              onChange={() => onWasWorkingChange("yes")}
+            />
+            Yes, keep idle time
+          </label>
+        </div>
 
         <div className="idle-actions">
-          <button className="idle-btn outline" onClick={onStop} disabled={busy}>
+          <button
+            className="idle-btn outline"
+            onClick={onStop}
+            disabled={busy}
+            title="Stop the timer"
+          >
             Stop timer
           </button>
-          <button className="idle-btn filled" onClick={onResume} disabled={busy}>
+          <button
+            className="idle-btn filled"
+            onClick={onResume}
+            disabled={busy}
+            title="Keep tracking"
+          >
             Resume timer
           </button>
         </div>

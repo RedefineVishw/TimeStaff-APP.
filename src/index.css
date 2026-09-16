@@ -8,57 +8,21 @@ body {
     sans-serif;
   margin: 0;
   padding: 0;
-  background: #f9fafb;
+  background: #f5f6fb;
   color: #111827;
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
-.app {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  padding: 1.5rem 1.25rem 0;
-}
-
-/* --- Timer display -------------------------------------------------- */
-
-.timer-row {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-}
-
-.timer-box {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  background: linear-gradient(135deg, #4f46e5, #4338ca);
-  color: white;
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 1.6rem;
-  font-weight: 700;
-  text-align: center;
-  padding: 0.75rem 0;
-  border-radius: 0.75rem;
-  letter-spacing: 0.03em;
-  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.25);
-  transition: box-shadow 0.2s ease;
-}
-
-.timer-box.live {
-  box-shadow: 0 4px 18px rgba(79, 70, 229, 0.4);
-}
-
-.pulse {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 999px;
-  background: #86efac;
-  box-shadow: 0 0 0 rgba(134, 239, 172, 0.6);
-  animation: pulse 1.8s infinite;
-  flex-shrink: 0;
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes pulse {
@@ -73,118 +37,513 @@ body {
   }
 }
 
-.round-btn {
-  width: 2.7rem;
-  height: 2.7rem;
+/* --- Boot screen ----------------------------------------------------- */
+
+.boot-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+
+.spinner {
+  width: 2rem;
+  height: 2rem;
   border-radius: 999px;
+  border: 3px solid #e5e7eb;
+  border-top-color: #4f46e5;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Login screen ------------------------------------------------------ */
+
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: linear-gradient(160deg, #eef0ff 0%, #f5f6fb 60%);
+}
+
+.login-card {
+  width: 22rem;
+  background: white;
+  border-radius: 1rem;
+  padding: 2.25rem 2rem;
+  box-shadow: 0 20px 50px rgba(79, 70, 229, 0.12);
+  text-align: center;
+}
+
+.login-logo {
+  width: 3rem;
+  height: 3rem;
+  margin: 0 auto 1rem;
+  display: block;
+  border-radius: 0.85rem;
+  box-shadow: 0 6px 16px rgba(79, 70, 229, 0.3);
+}
+
+.login-card h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+.login-subtitle {
+  color: #6b7280;
+  font-size: 0.85rem;
+  margin: 0 0 1.5rem;
+}
+
+.login-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  text-align: left;
+}
+
+.login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.login-card input {
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.6rem;
+  border: 1px solid #e5e7eb;
+  font-size: 0.9rem;
+  background: #f9fafb;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.login-card input:focus {
+  outline: none;
+  border-color: #4f46e5;
+  background: white;
+}
+
+.login-error {
+  color: #b91c1c;
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.login-submit {
+  margin-top: 0.25rem;
+  padding: 0.65rem;
+  border-radius: 0.6rem;
+  border: none;
+  background: linear-gradient(135deg, #4f46e5, #4338ca);
+  color: white;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3);
+  transition: transform 0.1s ease, box-shadow 0.15s ease;
+}
+
+.login-submit:hover {
+  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.4);
+}
+
+.login-submit:active {
+  transform: scale(0.98);
+}
+
+.login-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* --- App shell: two-pane layout ----------------------------------------- */
+
+.app-shell {
+  display: flex;
+  height: 100vh;
+}
+
+/* --- Left: task panel ---------------------------------------------------- */
+
+.task-panel {
+  width: 20rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  border-right: 1px solid #eef0f3;
+  padding: 1.1rem 1rem;
+}
+
+.task-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 1rem;
+}
+
+.brand-mark {
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 0.5rem;
+  flex-shrink: 0;
+}
+
+.brand-name {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.task-search {
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.6rem;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  font-size: 0.85rem;
+  margin-bottom: 0.65rem;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.task-search:focus {
+  outline: none;
+  border-color: #4f46e5;
+  background: white;
+}
+
+.task-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 -0.4rem;
+  padding: 0 0.4rem;
+}
+
+.task-list-empty {
+  text-align: center;
+  color: #9ca3af;
+  font-size: 0.82rem;
+  padding: 2rem 0.5rem;
+  line-height: 1.5;
+}
+
+/* Project-first browsing: pick a project, its tasks (assigned to you)
+   appear beneath it, click one to start/switch the timer. Only one
+   project's tasks show at a time (accordion) — search flattens this so
+   every match is visible without hunting for the right project first. */
+.project-section {
+  margin-bottom: 0.15rem;
+}
+
+.project-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border: none;
+  background: none;
+  padding: 0.6rem 0.5rem;
+  border-radius: 0.55rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s ease;
+}
+
+.project-row:hover {
+  background: #f3f4f6;
+}
+
+.project-row.active {
+  background: #eef2ff;
+}
+
+.project-row-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.04);
+}
+
+.project-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.87rem;
+  font-weight: 600;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-row.active .project-row-name {
+  color: #4338ca;
+}
+
+.project-row-time {
+  font-size: 0.78rem;
+  color: #9ca3af;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.project-row-chevron {
+  flex-shrink: 0;
+  color: #9ca3af;
+  transition: transform 0.15s ease;
+  font-size: 1rem;
+}
+
+.project-row-chevron.open {
+  transform: rotate(90deg);
+}
+
+.project-tasks {
+  padding-left: 1.35rem;
+  border-left: 2px solid #f3f4f6;
+  margin: 0.1rem 0 0.4rem 0.75rem;
+}
+
+.task-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border: none;
+  background: none;
+  padding: 0.5rem 0.5rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s ease;
+}
+
+.task-row:hover {
+  background: #f3f4f6;
+}
+
+.task-row.active {
+  background: #eef2ff;
+}
+
+.task-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.task-row-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-row.active .task-row-title {
+  color: #4338ca;
+  font-weight: 600;
+}
+
+.task-row-time {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.task-row-live {
+  color: #16a34a;
+  font-size: 0.6rem;
+  flex-shrink: 0;
+}
+
+.task-panel-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-top: 1px solid #eef0f3;
+  padding-top: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.footer-user {
+  flex: 1;
+  min-width: 0;
+}
+
+.footer-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footer-email {
+  font-size: 0.7rem;
+  color: #9ca3af;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footer-logout {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
   border: 1px solid #e5e7eb;
   background: white;
   color: #6b7280;
-  font-size: 1rem;
   cursor: pointer;
   flex-shrink: 0;
-  transition:
-    background 0.15s ease,
-    transform 0.1s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
-.round-btn:hover {
+.footer-logout:hover {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+/* --- Right: timer panel --------------------------------------------------- */
+
+.timer-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: 2rem;
+}
+
+.dashboard-link {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.5rem;
+  border: 1px solid #e5e7eb;
+  background: white;
+  color: #6b7280;
+  border-radius: 0.55rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dashboard-link:hover {
   background: #f3f4f6;
   color: #4f46e5;
 }
 
-.round-btn:active {
-  transform: scale(0.94);
-}
-
-.current-project {
-  text-align: center;
-  font-weight: 600;
-  font-size: 0.95rem;
-  margin: 1rem 0 0.15rem;
-}
-
-.current-task {
-  text-align: center;
-  color: #6b7280;
-  font-size: 0.8rem;
-  margin: 0 0 0.85rem;
-}
-
-.stop-row {
+.timer-display {
   display: flex;
+  align-items: center;
   justify-content: center;
-  padding: 0.25rem 0 0.85rem;
-  border-bottom: 1px solid #eef0f3;
+  gap: 0.65rem;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 3.4rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #111827;
+  transition: color 0.2s ease;
 }
 
-.circle-btn {
-  width: 3.4rem;
-  height: 3.4rem;
+.timer-display.live {
+  color: #4338ca;
+}
+
+.pulse {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: #86efac;
+  box-shadow: 0 0 0 rgba(134, 239, 172, 0.6);
+  animation: pulse 1.8s infinite;
+  flex-shrink: 0;
+}
+
+.timer-project {
+  margin: 1rem 0 0.15rem;
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.timer-task {
+  margin: 0 0 1.75rem;
+  color: #6b7280;
+  font-size: 0.9rem;
+  text-align: center;
+  max-width: 26rem;
+}
+
+.timer-control-row {
+  margin-bottom: 1.5rem;
+}
+
+.control-btn {
+  width: 4.5rem;
+  height: 4.5rem;
   border-radius: 999px;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
   cursor: pointer;
-  transition:
-    transform 0.1s ease,
-    box-shadow 0.15s ease;
+  transition: transform 0.1s ease, box-shadow 0.15s ease;
 }
 
-.circle-btn.running {
+.control-btn.running {
   background: linear-gradient(135deg, #4f46e5, #4338ca);
-  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.35);
+  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
 }
 
-.circle-btn.running:hover {
-  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.45);
+.control-btn.running:hover {
+  box-shadow: 0 8px 22px rgba(79, 70, 229, 0.45);
 }
 
-.circle-btn.running:active {
+.control-btn.running:active {
   transform: scale(0.95);
 }
 
-.circle-btn.running .square {
-  width: 0.85rem;
-  height: 0.85rem;
+.control-btn.running .square {
+  width: 1.1rem;
+  height: 1.1rem;
   background: white;
-  border-radius: 0.2rem;
+  border-radius: 0.25rem;
 }
 
-.circle-btn.idle {
+.control-btn.idle {
   background: #f9fafb;
   border: 2px dashed #d1d5db;
   cursor: default;
 }
 
-.stats-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.75rem;
+.idle-threshold-note {
   color: #9ca3af;
-  padding: 0.7rem 0;
+  font-size: 0.75rem;
+  margin-top: 0.5rem;
 }
 
 /* --- Banners ---------------------------------------------------------- */
 
 .banner {
   border-radius: 0.5rem;
-  padding: 0.55rem 0.75rem;
+  padding: 0.55rem 0.9rem;
   font-size: 0.8rem;
   margin-bottom: 0.6rem;
   animation: fade-in 0.15s ease;
-}
-
-@keyframes fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(-2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 .banner.error {
@@ -199,142 +558,6 @@ body {
   border: 1px solid #bfdbfe;
 }
 
-/* --- Search + project list --------------------------------------------- */
-
-.search {
-  width: 100%;
-  padding: 0.55rem 0.75rem;
-  border-radius: 0.6rem;
-  border: 1px solid #e5e7eb;
-  background: #f9fafb;
-  font-size: 0.85rem;
-  margin-bottom: 0.5rem;
-  transition:
-    border-color 0.15s ease,
-    background 0.15s ease;
-}
-
-.search:focus {
-  outline: none;
-  border-color: #4f46e5;
-  background: white;
-}
-
-.project-list {
-  flex: 1;
-  overflow-y: auto;
-  margin: 0 -1.25rem;
-  padding: 0 1.25rem;
-}
-
-.project-group {
-  border-bottom: 1px solid #f3f4f6;
-}
-
-.project-row,
-.task-row {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  border: none;
-  background: none;
-  padding: 0.6rem 0.4rem;
-  border-radius: 0.5rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.1s ease;
-}
-
-.project-row:hover,
-.task-row:hover {
-  background: #f3f4f6;
-}
-
-.project-row.active,
-.task-row.active {
-  background: #eef2ff;
-  color: #4338ca;
-  font-weight: 600;
-}
-
-.project-row .dot {
-  width: 0.6rem;
-  height: 0.6rem;
-  border-radius: 999px;
-  flex-shrink: 0;
-  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.04);
-}
-
-.project-row .name,
-.task-row .name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-row {
-  padding-left: 1.7rem;
-  color: #4b5563;
-  font-size: 0.82rem;
-}
-
-.task-row::before {
-  content: "";
-  width: 0.3rem;
-  height: 0.3rem;
-  border-radius: 999px;
-  background: #d1d5db;
-  flex-shrink: 0;
-  margin-right: -0.3rem;
-}
-
-.project-row .time,
-.task-row .time {
-  color: #9ca3af;
-  font-variant-numeric: tabular-nums;
-  font-size: 0.8rem;
-  flex-shrink: 0;
-}
-
-.empty {
-  text-align: center;
-  color: #9ca3af;
-  font-size: 0.85rem;
-  padding: 1.5rem 0;
-}
-
-/* --- Footer -------------------------------------------------------------- */
-
-.footer {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  border-top: 1px solid #eef0f3;
-  padding: 0.65rem 0;
-  font-size: 0.75rem;
-  color: #9ca3af;
-}
-
-.refresh {
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-size: 0.95rem;
-  color: #6b7280;
-  transition: transform 0.2s ease;
-}
-
-.refresh:hover {
-  color: #4f46e5;
-}
-
-.refresh:active {
-  transform: rotate(180deg);
-}
-
 /* --- Idle alert dialog --------------------------------------------------- */
 
 .idle-overlay {
@@ -347,6 +570,32 @@ body {
   justify-content: center;
   z-index: 50;
   animation: fade-in 0.15s ease;
+}
+
+/* The idle alert is its own small, frameless, always-on-top OS window (see
+   main.ts) — no backdrop needed since there's no app content behind it to
+   dim, and the card should fill the window edge-to-edge instead of
+   floating with margins inside it. */
+.idle-alert-window {
+  height: 100vh;
+}
+
+.idle-alert-window .idle-overlay {
+  position: static;
+  height: 100%;
+  background: none;
+  backdrop-filter: none;
+  animation: none;
+}
+
+.idle-alert-window .idle-dialog {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .idle-dialog {
@@ -403,6 +652,34 @@ body {
   text-align: center;
 }
 
+.idle-question {
+  margin-top: 1rem;
+}
+
+.idle-question-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #374151;
+  margin: 0 0 0.5rem;
+}
+
+.idle-radio {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #374151;
+  padding: 0.3rem 0;
+  cursor: pointer;
+}
+
+.idle-radio input {
+  accent-color: #4f46e5;
+  width: 0.95rem;
+  height: 0.95rem;
+  cursor: pointer;
+}
+
 .idle-actions {
   display: flex;
   justify-content: flex-end;
@@ -416,9 +693,7 @@ body {
   font-size: 0.85rem;
   font-weight: 500;
   cursor: pointer;
-  transition:
-    background 0.15s ease,
-    transform 0.1s ease;
+  transition: background 0.15s ease, transform 0.1s ease;
 }
 
 .idle-btn:active {

@@ -1,15 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  apiErrorMessage,
   fetchCurrentTimer,
+  fetchMyTimeEntries,
   fetchProjects,
-  fetchSettings,
+  fetchProjectTasks,
+  fetchTrackingSettings,
+  isEntitlementError,
+  logout as apiLogout,
+  restoreSession,
+  setSessionExpiredHandler,
   startTimer,
   stopTimer,
-  tickTimer,
-  type Project,
-  type RunningTimer,
+  uploadScreenshot,
+  type AuthUser,
+  type RunningTimeEntry,
+  type Task,
 } from "./lib/api";
-import { IdleAlertDialog } from "./IdleAlertDialog";
+import { Login } from "./Login";
+
+const WEB_DASHBOARD_URL = "http://localhost:3000";
+
+interface MyTask {
+  id: string;
+  title: string;
+  todaySeconds: number;
+}
+
+interface ProjectGroup {
+  id: string;
+  name: string;
+  todaySeconds: number;
+  tasks: MyTask[];
+}
 
 function formatClock(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);
@@ -19,311 +42,587 @@ function formatClock(totalSeconds: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
+// Compact "h:mm" used for the per-project/per-task today totals in the
+// sidebar, matching the reference UI's style (e.g. "4:48").
 function formatCompact(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   return `${h}:${m.toString().padStart(2, "0")}`;
 }
 
-const WEB_DASHBOARD_URL = "http://localhost:3001";
+// The org admin can configure the idle threshold as low as 15s (see the
+// tracking-settings range), so "round to whole minutes" silently displayed
+// "0 min" for any sub-minute value — show seconds below a minute instead.
+function formatDurationLabel(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.round(totalSeconds / 60);
+  return `${minutes} min`;
+}
+
+function flattenLeafTasks(tasks: Task[]): Task[] {
+  const leaves: Task[] = [];
+  for (const task of tasks) {
+    if (!task.subtasks || task.subtasks.length === 0) leaves.push(task);
+    else leaves.push(...flattenLeafTasks(task.subtasks));
+  }
+  return leaves;
+}
+
+const PROJECT_COLORS = ["#4f46e5", "#059669", "#d97706", "#db2777", "#0891b2", "#7c3aed", "#dc2626", "#65a30d"];
+function colorForProject(projectId: string) {
+  let hash = 0;
+  for (let i = 0; i < projectId.length; i++) hash = (hash * 31 + projectId.charCodeAt(i)) >>> 0;
+  return PROJECT_COLORS[hash % PROJECT_COLORS.length];
+}
+
+function startOfToday(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function findTaskInfo(groups: ProjectGroup[], taskId: string): { projectName: string; title: string } | null {
+  for (const group of groups) {
+    const task = group.tasks.find((t) => t.id === taskId);
+    if (task) return { projectName: group.name, title: task.title };
+  }
+  return null;
+}
+
+interface IdleAlertState {
+  idleSeconds: number;
+  shownAt: number;
+  // Elapsed seconds (including any prior banked base) at the exact moment
+  // idle began — the value the displayed clock should carry forward to if
+  // the user discards this idle stretch, instead of jumping to "now".
+  frozenElapsedSec: number;
+  projectName: string;
+  taskName: string;
+}
 
 export function App() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [running, setRunning] = useState<RunningTimer | null>(null);
-  const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useState(5);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [bootstrapping, setBootstrapping] = useState(true);
+
+  const [projectGroups, setProjectGroups] = useState<ProjectGroup[]>([]);
+  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
+  const [running, setRunning] = useState<RunningTimeEntry | null>(null);
+  const [idleThresholdSec, setIdleThresholdSec] = useState(300);
+  const [screenshotIntervalSec, setScreenshotIntervalSec] = useState(300);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [search, setSearch] = useState("");
-  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
+  const [loadingWorkspace, setLoadingWorkspace] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  // Set once idle crosses the threshold — shows the alert dialog instead of
-  // silently acting. shownAt (wall-clock time) drives the fixed grace period
-  // before an ignored dialog auto-resolves as Stop-and-discard.
-  const [idleAlert, setIdleAlert] = useState<{
-    idleSeconds: number;
-    shownAt: number;
-  } | null>(null);
+  const [idleAlert, setIdleAlert] = useState<IdleAlertState | null>(null);
+  // Elapsed seconds banked from earlier segments of the *same* continuous
+  // task session — carried forward across a discard-and-resume idle split
+  // (see handleIdleDialogResume), reset to 0 whenever a genuinely new task
+  // is started.
+  const [sessionElapsedBaseSec, setSessionElapsedBaseSec] = useState(0);
 
-  const tickInFlight = useRef(false);
-  // After "Resume timer", don't re-show the alert until the user has had
-  // genuine fresh activity (idle actually drops), so it doesn't instantly
-  // reappear on the very next 1s check while idle is still sky-high.
   const suppressUntilActiveRef = useRef(false);
-  // Mirrors idleAlert state, read synchronously inside the tick interval.
-  // Crucial: once the dialog is showing, it must stay showing (and ticking
-  // must stay paused) until the user explicitly resolves it — a transient
-  // dip in idle seconds (e.g. just moving the mouse without clicking
-  // anything) must NOT silently let ticking resume behind a stuck dialog.
-  const idleAlertRef = useRef<{ idleSeconds: number; shownAt: number } | null>(null);
+  const idleAlertRef = useRef<IdleAlertState | null>(null);
 
-  function setIdleAlertBoth(value: { idleSeconds: number; shownAt: number } | null) {
+  // The idle alert now lives in a genuinely separate, always-on-top OS
+  // window (see main.ts) rather than an overlay inside this window — the
+  // whole point is to catch the user's attention when they come back to
+  // their computer, which could be with any other app focused. This window
+  // still owns all the actual state/logic; it just tells main to show the
+  // popup with the data to display.
+  function setIdleAlertBoth(value: IdleAlertState | null) {
     idleAlertRef.current = value;
     setIdleAlert(value);
-  }
-
-  async function loadAll() {
-    try {
-      const [projectsData, currentTimer, settings] = await Promise.all([
-        fetchProjects(),
-        fetchCurrentTimer(),
-        fetchSettings(),
-      ]);
-      setProjects(projectsData);
-      setRunning(currentTimer);
-      setIdleTimeoutMinutes(settings.idleTimeoutMinutes);
-      setLastUpdated(new Date());
-      setError(null);
-    } catch {
-      setError("Couldn't reach the TimeStaff backend at localhost:3000.");
+    if (value) {
+      window.timeStaff.idleAlert.show({
+        idleSeconds: value.idleSeconds,
+        projectName: value.projectName,
+        taskName: value.taskName,
+      });
+    } else {
+      window.timeStaff.idleAlert.hide();
     }
   }
 
+  // A session-expired 401 (refresh also failed) drops back to the login
+  // screen — wired once, module-level, since lib/api.ts has no React state
+  // of its own.
   useEffect(() => {
-    loadAll();
+    setSessionExpiredHandler(() => {
+      setUser(null);
+      setRunning(null);
+      setProjectGroups([]);
+    });
   }, []);
 
-  // While running: tick the visible clock + push the tick to the backend
-  // every second, and check system-wide idle time. Crossing the threshold
-  // shows the alert dialog (handled below) rather than silently acting —
-  // the user decides Stop (discard the idle stretch) or Resume (keep going).
+  useEffect(() => {
+    (async () => {
+      const restoredUser = await restoreSession();
+      if (restoredUser) {
+        setUser(restoredUser);
+        await loadWorkspace(restoredUser);
+      }
+      setBootstrapping(false);
+    })();
+  }, []);
+
+  async function loadWorkspace(currentUser: AuthUser) {
+    setLoadingWorkspace(true);
+    setError(null);
+    try {
+      const todayStart = startOfToday();
+      const [projects, current, todayEntries] = await Promise.all([
+        fetchProjects(),
+        fetchCurrentTimer(),
+        fetchMyTimeEntries(todayStart.toISOString(), new Date().toISOString()),
+      ]);
+      const activeProjects = projects.filter((p) => p.status === "ACTIVE");
+
+      const secondsByTask = new Map<string, number>();
+      for (const entry of todayEntries) {
+        secondsByTask.set(entry.taskId, (secondsByTask.get(entry.taskId) ?? 0) + (entry.durationSec ?? 0));
+      }
+
+      const tasksPerProject = await Promise.all(activeProjects.map((p) => fetchProjectTasks(p.id)));
+      const groups: ProjectGroup[] = [];
+      activeProjects.forEach((project, i) => {
+        const myLeafTasks = flattenLeafTasks(tasksPerProject[i]).filter((t) => t.assigneeId === currentUser.id);
+        if (myLeafTasks.length === 0) return;
+
+        const tasks: MyTask[] = myLeafTasks.map((t) => ({
+          id: t.id,
+          title: t.title,
+          todaySeconds: secondsByTask.get(t.id) ?? 0,
+        }));
+        groups.push({
+          id: project.id,
+          name: project.name,
+          todaySeconds: tasks.reduce((sum, t) => sum + t.todaySeconds, 0),
+          tasks,
+        });
+      });
+      setProjectGroups(groups);
+      setRunning(current);
+
+      // Land on whichever project has the running task, or the first one —
+      // matches the reference UI always showing one project's tasks open.
+      const runningProjectId = current ? groups.find((g) => g.tasks.some((t) => t.id === current.taskId))?.id : null;
+      setExpandedProjectId(runningProjectId ?? groups[0]?.id ?? null);
+
+      if (currentUser.organizationId) {
+        const settings = await fetchTrackingSettings(currentUser.organizationId).catch(() => null);
+        if (settings) {
+          setIdleThresholdSec(settings.idleThresholdSec);
+          setScreenshotIntervalSec(settings.screenshotIntervalSec);
+        }
+      }
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't reach the TimeStaff backend at localhost:5000."));
+    } finally {
+      setLoadingWorkspace(false);
+    }
+  }
+
+  async function handleLoginSuccess(loggedInUser: AuthUser) {
+    setUser(loggedInUser);
+    await loadWorkspace(loggedInUser);
+  }
+
+  async function handleLogout() {
+    await apiLogout();
+    setUser(null);
+    setRunning(null);
+    setProjectGroups([]);
+  }
+
+  // Timer tick + idle detection while a timer is running. Displayed elapsed
+  // = sessionElapsedBaseSec (banked from earlier segments of this same
+  // session, see handleIdleDialogResume) + time since the current entry's
+  // startedAt.
   useEffect(() => {
     if (!running) return;
 
     const startedAt = new Date(running.startedAt).getTime();
-    setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
-
-    // Fixed, short grace period before an ignored dialog auto-resolves —
-    // independent of the configured idle threshold, so this stays
-    // responsive even when someone sets a 10-minute threshold.
-    const ABANDONED_GRACE_MS = 30_000;
+    setElapsedSeconds(sessionElapsedBaseSec + Math.floor((Date.now() - startedAt) / 1000));
 
     const freezeClock = (idleSeconds: number) =>
-      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - idleSeconds * 1000 - startedAt) / 1000)));
+      setElapsedSeconds(
+        sessionElapsedBaseSec + Math.max(0, Math.floor((Date.now() - idleSeconds * 1000 - startedAt) / 1000)),
+      );
 
     const interval = setInterval(async () => {
       const idleSeconds = await window.timeStaff.getIdleSeconds();
-      const thresholdSeconds = idleTimeoutMinutes * 60;
 
-      // Dialog already up — stay paused regardless of what idleSeconds does
-      // right now. Only an explicit Stop/Resume click or the abandon-grace
-      // timeout (below) is allowed to leave this state.
-      if (idleAlertRef.current) {
-        if (Date.now() - idleAlertRef.current.shownAt >= ABANDONED_GRACE_MS) {
-          const finalIdleSeconds = idleAlertRef.current.idleSeconds;
-          setIdleAlertBoth(null);
-          await resolveIdleStop(finalIdleSeconds);
-        } else {
-          setIdleAlertBoth({ ...idleAlertRef.current, idleSeconds });
-          freezeClock(idleSeconds);
-        }
-        return;
-      }
+      // The dialog is up and waiting — do nothing until the user explicitly
+      // clicks Stop or Resume (handled by the idle-alert:response listener
+      // below). No timeout, no auto-close: it stays on screen for as long
+      // as it takes, even if that's a very long time.
+      if (idleAlertRef.current) return;
 
-      if (idleSeconds < 5) {
-        // Genuine fresh activity — safe to alert again next time idle builds up.
-        suppressUntilActiveRef.current = false;
-      }
+      if (idleSeconds < 5) suppressUntilActiveRef.current = false;
 
-      if (idleSeconds >= thresholdSeconds && !suppressUntilActiveRef.current) {
-        setIdleAlertBoth({ idleSeconds, shownAt: Date.now() });
+      if (idleSeconds >= idleThresholdSec && !suppressUntilActiveRef.current) {
+        const frozenElapsedSec =
+          sessionElapsedBaseSec + Math.max(0, Math.floor((Date.now() - idleSeconds * 1000 - startedAt) / 1000));
+        const taskInfo = findTaskInfo(projectGroups, running.taskId);
+        setIdleAlertBoth({
+          idleSeconds,
+          shownAt: Date.now(),
+          frozenElapsedSec,
+          projectName: taskInfo?.projectName ?? running.task?.project.name ?? "—",
+          taskName: taskInfo?.title ?? running.task?.title ?? "—",
+        });
         freezeClock(idleSeconds);
         return;
       }
 
-      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
-
-      if (tickInFlight.current) return;
-      tickInFlight.current = true;
-      try {
-        await tickTimer();
-      } catch {
-        // A single missed tick isn't fatal — duration is finalized from
-        // startedAt correctly whenever the timer eventually stops.
-      } finally {
-        tickInFlight.current = false;
-      }
+      setElapsedSeconds(sessionElapsedBaseSec + Math.floor((Date.now() - startedAt) / 1000));
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [running, idleTimeoutMinutes]);
+  }, [running, idleThresholdSec, sessionElapsedBaseSec, projectGroups]);
+
+  // Periodic screenshot capture while a timer is running — pixel grab
+  // happens in the main process (only place with real OS access), the
+  // upload happens here so it reuses the same authenticated axios instance
+  // (token refresh included) instead of duplicating auth in main.
+  useEffect(() => {
+    if (!running) return;
+
+    let entitlementDenied = false;
+    const taskId = running.taskId;
+
+    const interval = setInterval(async () => {
+      if (entitlementDenied) return;
+      // Don't capture while the idle dialog is up — the user isn't
+      // confirmed to be working during this stretch, so there's nothing
+      // meaningful to screenshot yet (and if discarded, the interval this
+      // capture would have belonged to gets excluded from logged time
+      // anyway).
+      if (idleAlertRef.current) return;
+      try {
+        const bytes = await window.timeStaff.captureScreenshot();
+        const blob = new Blob([bytes], { type: "image/png" });
+        await uploadScreenshot(taskId, blob);
+        if (typeof Notification !== "undefined") {
+          new Notification("Screenshot captured", {
+            body: "Added to your current time entry.",
+            silent: true,
+          });
+        }
+      } catch (err) {
+        if (isEntitlementError(err)) {
+          // Org's plan doesn't include screenshots — stop trying instead of
+          // failing silently on every interval for the rest of the session.
+          entitlementDenied = true;
+        }
+        // Any other failure (transient network blip, etc.) just tries again
+        // next interval — a single missed screenshot isn't worth surfacing.
+      }
+    }, screenshotIntervalSec * 1000);
+
+    return () => clearInterval(interval);
+  }, [running, screenshotIntervalSec]);
 
   async function resolveIdleStop(idleSeconds: number) {
+    if (!running) return;
     const idleSince = new Date(Date.now() - idleSeconds * 1000);
     try {
-      await stopTimer(idleSince.toISOString());
+      await stopTimer(running.id, idleSince.toISOString());
     } catch {
       // Nothing more we can do here — leave it to the user to stop manually.
     }
     setRunning(null);
     setElapsedSeconds(0);
-    setNotice(
-      `Timer stopped — no activity for ${idleTimeoutMinutes} min. That idle time was discarded.`,
-    );
-    setProjects(await fetchProjects().catch(() => projects));
+    setSessionElapsedBaseSec(0);
+    setNotice(`Timer stopped — no activity for ${formatDurationLabel(idleThresholdSec)}. That idle time was discarded.`);
   }
 
-  const allTimeSeconds = useMemo(
-    () => projects.reduce((sum, p) => sum + p.totalSeconds, 0),
-    [projects],
-  );
-
-  const filteredProjects = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return projects;
-    return projects
-      .map((project) => ({
-        ...project,
-        tasks: project.tasks.filter((t) => t.name.toLowerCase().includes(q)),
-      }))
-      .filter((project) => project.name.toLowerCase().includes(q) || project.tasks.length > 0);
-  }, [projects, search]);
-
-  async function handleIdleDialogStop() {
-    if (!idleAlert) return;
+  // "Stop timer" in the idle dialog branches on the "Were you working?"
+  // choice: discard closes out the entry excluding the idle stretch (same
+  // as the abandoned-grace-period auto-stop); keep just stops normally,
+  // counting the idle stretch as worked time like any other stop.
+  async function handleIdleDialogStop(wasWorking: "no" | "yes") {
+    if (!idleAlert || !running) return;
     setBusy(true);
+    const alert = idleAlert;
     setIdleAlertBoth(null);
-    await resolveIdleStop(idleAlert.idleSeconds);
+    if (wasWorking === "yes") {
+      try {
+        await stopTimer(running.id);
+      } catch {
+        // Leave it to the user to stop manually if this failed.
+      }
+      setRunning(null);
+      setElapsedSeconds(0);
+      setSessionElapsedBaseSec(0);
+      setNotice(null);
+    } else {
+      await resolveIdleStop(alert.idleSeconds);
+    }
     setBusy(false);
   }
 
-  function handleIdleDialogResume() {
+  // "Resume timer" also branches on the choice. "Yes, keep idle time" just
+  // dismisses the dialog and lets the same entry keep running uninterrupted
+  // — the idle stretch counts as worked time, nothing to split.
+  // "No, discard idle time" closes out the current entry at the moment
+  // idle actually began (excluding the idle+dialog stretch from logged
+  // duration) and immediately opens a fresh entry so tracking continues —
+  // the displayed clock carries the pre-idle elapsed time forward instead
+  // of jumping by the whole idle+dialog gap.
+  async function handleIdleDialogResume(wasWorking: "no" | "yes") {
+    if (!idleAlert || !running) return;
     suppressUntilActiveRef.current = true;
+    const alert = idleAlert;
     setIdleAlertBoth(null);
     setNotice(null);
+
+    if (wasWorking === "yes") {
+      return;
+    }
+
+    setBusy(true);
+    const idleSince = new Date(alert.shownAt - alert.idleSeconds * 1000);
+    try {
+      await stopTimer(running.id, idleSince.toISOString());
+      const newEntry = await startTimer(running.taskId);
+      setSessionElapsedBaseSec(alert.frozenElapsedSec);
+      setElapsedSeconds(alert.frozenElapsedSec);
+      setRunning(newEntry);
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't resume the timer — start it again from the task list."));
+      setRunning(null);
+      setElapsedSeconds(0);
+      setSessionElapsedBaseSec(0);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function handleStartTask(taskId: string) {
+  // The idle-alert window has no logic of its own — it reports the user's
+  // click back through main, which forwards it here as an IPC event.
+  useEffect(() => {
+    return window.timeStaff.idleAlert.onResponse(({ action, wasWorking }) => {
+      if (action === "stop") {
+        handleIdleDialogStop(wasWorking);
+      } else {
+        handleIdleDialogResume(wasWorking);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idleAlert, running]);
+
+  async function handleSwitchTask(taskId: string) {
+    if (running?.taskId === taskId) return;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
       const entry = await startTimer(taskId);
       setRunning(entry);
-    } catch {
-      setError("Couldn't start the timer.");
+      setSessionElapsedBaseSec(0);
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't start the timer for that task."));
     } finally {
       setBusy(false);
     }
   }
 
   async function handleStop() {
+    if (!running) return;
     setBusy(true);
     setError(null);
     try {
-      await stopTimer();
+      await stopTimer(running.id);
       setRunning(null);
       setElapsedSeconds(0);
-      setProjects(await fetchProjects());
-    } catch {
-      setError("Couldn't stop the timer.");
+      setSessionElapsedBaseSec(0);
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't stop the timer."));
     } finally {
       setBusy(false);
     }
   }
 
-  return (
-    <div className="app">
-      {idleAlert && running && (
-        <IdleAlertDialog
-          idleSeconds={idleAlert.idleSeconds}
-          projectName={running.task.project.name}
-          taskName={running.task.name}
-          onStop={handleIdleDialogStop}
-          onResume={handleIdleDialogResume}
-          busy={busy}
-        />
-      )}
+  function handleToggleProject(projectId: string) {
+    setExpandedProjectId((current) => (current === projectId ? null : projectId));
+  }
 
-      <div className="timer-row">
-        <div className={`timer-box ${running && !idleAlert ? "live" : ""}`}>
+  // Searching flattens the accordion — every project with a name or task
+  // match shows expanded, so you can jump straight to a task without first
+  // hunting for which project it's under.
+  const isSearching = search.trim().length > 0;
+  const filteredGroups = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return projectGroups;
+    return projectGroups
+      .map((g) => ({
+        ...g,
+        tasks: g.name.toLowerCase().includes(q) ? g.tasks : g.tasks.filter((t) => t.title.toLowerCase().includes(q)),
+      }))
+      .filter((g) => g.tasks.length > 0);
+  }, [projectGroups, search]);
+
+  const currentTask = running
+    ? projectGroups.flatMap((g) => g.tasks.map((t) => ({ ...t, projectId: g.id, projectName: g.name }))).find(
+        (t) => t.id === running.taskId,
+      )
+    : null;
+
+  if (bootstrapping) {
+    return (
+      <div className="boot-screen">
+        <div className="spinner" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login onSuccess={handleLoginSuccess} />;
+  }
+
+  return (
+    <div className="app-shell">
+      <aside className="task-panel">
+        <div className="task-panel-header">
+          <svg className="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden>
+            <rect width="32" height="32" rx="7" fill="#4F46E5" />
+            <rect x="13.5" y="3" width="5" height="3" rx="1.2" fill="#fff" />
+            <rect x="20.3" y="5" width="4" height="2.6" rx="1" fill="#fff" transform="rotate(45 22.3 6.3)" />
+            <circle cx="16" cy="18.5" r="10" fill="none" stroke="#fff" strokeWidth="2.3" />
+            <line x1="16" y1="18.5" x2="16" y2="12.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
+            <line x1="16" y1="18.5" x2="20" y2="18.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
+          </svg>
+          <span className="brand-name">TimeStaff</span>
+        </div>
+
+        <input
+          className="task-search"
+          placeholder="Search projects or tasks…"
+          autoFocus
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+
+        <div className="task-list">
+          {loadingWorkspace ? (
+            <p className="task-list-empty">Loading your projects…</p>
+          ) : filteredGroups.length === 0 ? (
+            <p className="task-list-empty">
+              {projectGroups.length === 0 ? "No tasks assigned to you yet." : "Nothing matches your search."}
+            </p>
+          ) : (
+            filteredGroups.map((group) => (
+              <ProjectSection
+                key={group.id}
+                group={group}
+                expanded={isSearching || expandedProjectId === group.id}
+                runningTaskId={running?.taskId ?? null}
+                onToggle={() => handleToggleProject(group.id)}
+                onTaskClick={handleSwitchTask}
+                disabled={busy}
+              />
+            ))
+          )}
+        </div>
+
+        <div className="task-panel-footer">
+          <div className="footer-user">
+            <p className="footer-name">{user.firstName} {user.lastName}</p>
+            <p className="footer-email">{user.email}</p>
+          </div>
+          <button className="footer-logout" onClick={handleLogout} title="Log out">
+            ⎋
+          </button>
+        </div>
+      </aside>
+
+      <main className="timer-panel">
+        <button
+          className="dashboard-link"
+          onClick={() => window.timeStaff.openExternal(WEB_DASHBOARD_URL)}
+          title="Open web dashboard"
+        >
+          Open dashboard ↗
+        </button>
+
+        <div className={`timer-display ${running && !idleAlert ? "live" : ""}`}>
           {running && !idleAlert && <span className="pulse" />}
           {formatClock(elapsedSeconds)}
         </div>
-        <button
-          className="round-btn"
-          title="Open web dashboard"
-          onClick={() => window.timeStaff.openExternal(WEB_DASHBOARD_URL)}
-        >
-          ↗
-        </button>
-      </div>
 
-      <p className="current-project">
-        {running ? running.task.project.name : "No project selected"}
-      </p>
-      <p className="current-task">
-        {running ? running.task.name : "Click a task below to start tracking"}
-      </p>
+        <p className="timer-project" style={currentTask ? { color: colorForProject(currentTask.projectId) } : undefined}>
+          {currentTask?.projectName ?? "No task selected"}
+        </p>
+        <p className="timer-task">{currentTask?.title ?? "Pick a task from the left to start tracking"}</p>
 
-      <div className="stop-row">
-        {running ? (
-          <button className="circle-btn running" onClick={handleStop} disabled={busy} title="Stop">
-            <span className="square" />
-          </button>
-        ) : (
-          <div className="circle-btn idle" />
-        )}
-      </div>
+        <div className="timer-control-row">
+          {running ? (
+            <button className="control-btn running" onClick={handleStop} disabled={busy} title="Stop">
+              <span className="square" />
+            </button>
+          ) : (
+            <div className="control-btn idle" />
+          )}
+        </div>
 
-      <div className="stats-row">
-        <span>Idle timeout: {idleTimeoutMinutes}m</span>
-        <span>All time: {formatCompact(allTimeSeconds)}</span>
-      </div>
+        {error && <p className="banner error">{error}</p>}
+        {notice && <p className="banner notice">{notice}</p>}
 
-      {error && <p className="banner error">{error}</p>}
-      {notice && <p className="banner notice">{notice}</p>}
+        <p className="idle-threshold-note">Idle discard after {formatDurationLabel(idleThresholdSec)} of inactivity</p>
+      </main>
+    </div>
+  );
+}
 
-      <input
-        className="search"
-        placeholder="Search projects"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-      />
+function ProjectSection({
+  group,
+  expanded,
+  runningTaskId,
+  onToggle,
+  onTaskClick,
+  disabled,
+}: {
+  group: ProjectGroup;
+  expanded: boolean;
+  runningTaskId: string | null;
+  onToggle: () => void;
+  onTaskClick: (taskId: string) => void;
+  disabled: boolean;
+}) {
+  const isActiveProject = group.tasks.some((t) => t.id === runningTaskId);
 
-      <div className="project-list">
-        {filteredProjects.map((project) => {
-          const isExpanded = expandedProjectId === project.id || search.trim() !== "";
-          const isActive = running?.task.project.id === project.id;
-          return (
-            <div key={project.id} className="project-group">
-              <button
-                className={`project-row ${isActive ? "active" : ""}`}
-                onClick={() =>
-                  setExpandedProjectId(expandedProjectId === project.id ? null : project.id)
-                }
-              >
-                <span className="dot" style={{ backgroundColor: project.color ?? "#9CA3AF" }} />
-                <span className="name">{project.name}</span>
-                <span className="time">{formatCompact(project.totalSeconds)}</span>
-              </button>
-              {isExpanded &&
-                project.tasks.map((task) => (
-                  <button
-                    key={task.id}
-                    className={`task-row ${running?.taskId === task.id ? "active" : ""}`}
-                    onClick={() => handleStartTask(task.id)}
-                    disabled={busy}
-                  >
-                    <span className="name">{task.name}</span>
-                    <span className="time">{formatCompact(task.totalSeconds)}</span>
-                  </button>
-                ))}
-            </div>
-          );
-        })}
-        {filteredProjects.length === 0 && <p className="empty">No projects found.</p>}
-      </div>
+  return (
+    <div className="project-section">
+      <button
+        className={`project-row ${isActiveProject ? "active" : ""}`}
+        onClick={onToggle}
+        aria-expanded={expanded}
+      >
+        <span className="project-row-dot" style={{ backgroundColor: colorForProject(group.id) }} />
+        <span className="project-row-name">{group.name}</span>
+        <span className="project-row-time">{formatCompact(group.todaySeconds)}</span>
+        <span className={`project-row-chevron ${expanded ? "open" : ""}`}>›</span>
+      </button>
 
-      <div className="footer">
-        <button className="refresh" onClick={loadAll} title="Refresh">
-          ⟳
-        </button>
-        <span>
-          {lastUpdated ? `Last updated at: ${lastUpdated.toLocaleTimeString()}` : "Loading…"}
-        </span>
-      </div>
+      {expanded && (
+        <div className="project-tasks">
+          {group.tasks.map((task) => (
+            <button
+              key={task.id}
+              className={`task-row ${task.id === runningTaskId ? "active" : ""}`}
+              onClick={() => onTaskClick(task.id)}
+              disabled={disabled}
+            >
+              <span className="task-row-title">{task.title}</span>
+              <span className="task-row-time">{formatCompact(task.todaySeconds)}</span>
+              {task.id === runningTaskId && <span className="task-row-live">●</span>}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
