@@ -1,11 +1,39 @@
-import { app, BrowserWindow, ipcMain, powerMonitor, screen, shell, safeStorage, desktopCapturer } from 'electron';
+import { app, BrowserWindow, ipcMain, powerMonitor, screen, shell, safeStorage, desktopCapturer, Notification, Menu } from 'electron';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import { execFile } from 'node:child_process';
 import started from 'electron-squirrel-startup';
+
+// This is a single-purpose timer app, not a document editor — the default
+// File/Edit/View/Window menu bar Electron adds automatically has no
+// use here (nothing in it applies) and doesn't match the branding of a
+// small always-on-top-adjacent utility window. Removing it applies to every
+// BrowserWindow the app creates (main window and the idle-alert popup).
+Menu.setApplicationMenu(null);
 
 // .ico gives a sharper Windows taskbar/title-bar icon than .png at small
 // sizes; other platforms fall back to the PNG.
 const WINDOW_ICON = path.join(__dirname, `../../assets/icon${process.platform === 'win32' ? '.ico' : '.png'}`);
+const AUMID = 'com.timestaff.app';
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId(AUMID);
+
+  // setAppUserModelId alone only fixes the toast's "sent by" name/icon once
+  // Windows already knows this AUMID belongs to "TimeStaff" — which normally
+  // comes from a Start Menu shortcut created at install time (Squirrel does
+  // this for a packaged build, but not in `npm run start` dev mode). The
+  // documented dev-mode workaround is to register the AUMID's display name
+  // and icon directly in the registry — same effect, no install required.
+  // Best-effort: if `reg` isn't on PATH for some reason, notifications still
+  // work, they just keep showing "Electron" until the app is packaged.
+  const keyPath = `HKCU\\SOFTWARE\\Classes\\AppUserModelId\\${AUMID}`;
+  const ignoreResult = () => {
+    // Fire-and-forget — see the best-effort note above.
+  };
+  execFile('reg', ['add', keyPath, '/v', 'DisplayName', '/t', 'REG_SZ', '/d', 'TimeStaff', '/f'], ignoreResult);
+  execFile('reg', ['add', keyPath, '/v', 'IconUri', '/t', 'REG_SZ', '/d', WINDOW_ICON, '/f'], ignoreResult);
+}
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -77,6 +105,22 @@ ipcMain.handle('capture-screenshot', async () => {
     throw new Error('No screen source available to capture');
   }
   return new Uint8Array(primarySource.thumbnail.toPNG());
+});
+
+// The web Notification API (used from the renderer) can't set a custom
+// icon on Windows — the toast falls back to Electron's own default icon
+// and app name ("Electron"), not TimeStaff's, regardless of the title/body
+// text passed in. Electron's native Notification (main process only) does
+// let us set a real icon, so screenshot-capture notifications are raised
+// from here instead.
+ipcMain.handle('notify-screenshot-captured', () => {
+  if (!Notification.isSupported()) return;
+  new Notification({
+    title: 'TimeStaff',
+    body: 'Screenshot captured.',
+    icon: WINDOW_ICON,
+    silent: true,
+  }).show();
 });
 
 let mainWindow: BrowserWindow | null = null;

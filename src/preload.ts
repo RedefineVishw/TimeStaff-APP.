@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('timeStaff', {
   getIdleSeconds: (): Promise<number> => ipcRenderer.invoke('get-idle-seconds'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open-external', url),
   captureScreenshot: (): Promise<Uint8Array> => ipcRenderer.invoke('capture-screenshot'),
+  // Raised from the main process (see main.ts) so the toast gets a real
+  // TimeStaff icon instead of falling back to Electron's default.
+  notifyScreenshotCaptured: (): Promise<void> => ipcRenderer.invoke('notify-screenshot-captured'),
   auth: {
     getRefreshToken: (): Promise<string | null> => ipcRenderer.invoke('auth:get-refresh-token'),
     setRefreshToken: (token: string): Promise<boolean> => ipcRenderer.invoke('auth:set-refresh-token', token),

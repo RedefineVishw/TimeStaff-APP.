@@ -1,7 +1,11 @@
 import axios, { type InternalAxiosRequestConfig } from "axios";
 
+// LAN IP, not "localhost" — a packaged build running on another machine on
+// the network needs to reach the backend on whichever PC is actually
+// running it. Revert to "http://localhost:5000" for normal single-machine
+// dev/testing.
 export const api = axios.create({
-  baseURL: "http://localhost:5000",
+  baseURL: "http://10.0.10.61:5000",
   headers: { "X-Client-Type": "desktop" },
 });
 // No hardcoded Content-Type default — axios infers it per request from the
@@ -149,6 +153,8 @@ export interface Task {
   title: string;
   status: string;
   assigneeId: string | null;
+  startDate: string | null;
+  dueDate: string | null;
   estimatedMinutes: number | null;
   subtasks?: Task[];
 }

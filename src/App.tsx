@@ -25,6 +25,27 @@ interface MyTask {
   id: string;
   title: string;
   todaySeconds: number;
+  dueDate: string | null;
+}
+
+// startDate/dueDate arrive as the UTC-midnight instant of the calendar day
+// picked on the web app (see DateRangeInput's toISODate there), not a
+// specific moment in time — comparing them against "today" built the same
+// way (UTC midnight of the browser's own local Y/M/D) keeps this immune to
+// the timezone off-by-one bug already fixed for date *display* on the web
+// app (a local-timezone read of a UTC-midnight value can land on the wrong
+// calendar day for anyone not near UTC).
+function todayAsUTCMidnight(): number {
+  const now = new Date();
+  return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+function hasNotStartedYet(startDate: string | null): boolean {
+  return !!startDate && new Date(startDate).getTime() > todayAsUTCMidnight();
+}
+
+function isOverdue(dueDate: string | null | undefined): boolean {
+  return !!dueDate && new Date(dueDate).getTime() < todayAsUTCMidnight();
 }
 
 interface ProjectGroup {
@@ -187,13 +208,28 @@ export function App() {
       const tasksPerProject = await Promise.all(activeProjects.map((p) => fetchProjectTasks(p.id)));
       const groups: ProjectGroup[] = [];
       activeProjects.forEach((project, i) => {
-        const myLeafTasks = flattenLeafTasks(tasksPerProject[i]).filter((t) => t.assigneeId === currentUser.id);
+        // Only In Progress work belongs in the tracker's task list — a To Do
+        // item hasn't been picked up yet, and In Review/Done are finished as
+        // far as time tracking is concerned. A task whose start date hasn't
+        // arrived yet is excluded too — e.g. today is the 16th and the task
+        // doesn't start until the 17th, it isn't actionable yet. (A task
+        // whose *due* date has already passed stays visible — see isOverdue
+        // below, it's flagged as missed rather than hidden.) The one
+        // exception to all of this: whatever task currently has a running
+        // timer stays visible regardless of status/dates, so an active timer
+        // never disappears out from under the user mid-session.
+        const myLeafTasks = flattenLeafTasks(tasksPerProject[i]).filter((t) => {
+          if (t.assigneeId !== currentUser.id) return false;
+          if (t.id === current?.taskId) return true;
+          return t.status === "IN_PROGRESS" && !hasNotStartedYet(t.startDate);
+        });
         if (myLeafTasks.length === 0) return;
 
         const tasks: MyTask[] = myLeafTasks.map((t) => ({
           id: t.id,
           title: t.title,
           todaySeconds: secondsByTask.get(t.id) ?? 0,
+          dueDate: t.dueDate,
         }));
         groups.push({
           id: project.id,
@@ -227,6 +263,25 @@ export function App() {
   async function handleLoginSuccess(loggedInUser: AuthUser) {
     setUser(loggedInUser);
     await loadWorkspace(loggedInUser);
+  }
+
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Manual refresh — re-pulls projects/tasks/today's-totals from the
+  // backend. Without this, a task created, reassigned, or completed on the
+  // web app never shows up here until the whole desktop app is restarted,
+  // since loadWorkspace() otherwise only ever runs once at login/session
+  // restore. Doesn't touch `running`/`elapsedSeconds` — an in-progress
+  // timer keeps ticking through a refresh exactly like it does through any
+  // other background data reload.
+  async function handleRefresh() {
+    if (!user || refreshing) return;
+    setRefreshing(true);
+    try {
+      await loadWorkspace(user);
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   async function handleLogout() {
@@ -305,12 +360,9 @@ export function App() {
         const bytes = await window.timeStaff.captureScreenshot();
         const blob = new Blob([bytes], { type: "image/png" });
         await uploadScreenshot(taskId, blob);
-        if (typeof Notification !== "undefined") {
-          new Notification("Screenshot captured", {
-            body: "Added to your current time entry.",
-            silent: true,
-          });
-        }
+        // Raised from the main process (not the web Notification API) so
+        // the OS toast shows TimeStaff's own icon instead of Electron's.
+        window.timeStaff.notifyScreenshotCaptured();
       } catch (err) {
         if (isEntitlementError(err)) {
           // Org's plan doesn't include screenshots — stop trying instead of
@@ -411,7 +463,6 @@ export function App() {
         handleIdleDialogResume(wasWorking);
       }
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idleAlert, running]);
 
   async function handleSwitchTask(taskId: string) {
@@ -496,6 +547,27 @@ export function App() {
             <line x1="16" y1="18.5" x2="20" y2="18.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
           </svg>
           <span className="brand-name">TimeStaff</span>
+          <button
+            className="refresh-btn"
+            onClick={handleRefresh}
+            disabled={refreshing || loadingWorkspace}
+            title="Refresh tasks"
+          >
+            <svg
+              className={refreshing || loadingWorkspace ? "spin" : ""}
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 4v6h-6" />
+            </svg>
+          </button>
         </div>
 
         <input
@@ -557,6 +629,7 @@ export function App() {
           {currentTask?.projectName ?? "No task selected"}
         </p>
         <p className="timer-task">{currentTask?.title ?? "Pick a task from the left to start tracking"}</p>
+        {isOverdue(currentTask?.dueDate) && <p className="overdue-badge">Missed due date</p>}
 
         <div className="timer-control-row">
           {running ? (
@@ -617,6 +690,11 @@ function ProjectSection({
               disabled={disabled}
             >
               <span className="task-row-title">{task.title}</span>
+              {isOverdue(task.dueDate) && (
+                <span className="task-row-overdue" title="Missed due date">
+                  Missed due date
+                </span>
+              )}
               <span className="task-row-time">{formatCompact(task.todaySeconds)}</span>
               {task.id === runningTaskId && <span className="task-row-live">●</span>}
             </button>

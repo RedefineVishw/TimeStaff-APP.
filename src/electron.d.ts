@@ -19,6 +19,7 @@ declare global {
       getIdleSeconds: () => Promise<number>;
       openExternal: (url: string) => Promise<void>;
       captureScreenshot: () => Promise<Uint8Array>;
+      notifyScreenshotCaptured: () => Promise<void>;
       auth: {
         getRefreshToken: () => Promise<string | null>;
         setRefreshToken: (token: string) => Promise<boolean>;
