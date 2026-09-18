@@ -61,33 +61,77 @@ body {
 /* --- Title bar -----------------------------------------------------------
    Replaces the native OS title bar (see `titleBarStyle: 'hidden'` in
    main.ts) so it can actually match the app's own background/height/font
-   instead of being stuck with the OS default dark bar. Height must match
-   the `titleBarOverlay.height` passed to BrowserWindow, or the native
-   minimize/maximize/close buttons (drawn by the OS on top of this) won't
-   line up with it vertically. */
+   instead of being stuck with the OS default dark bar, and draws its own
+   minimize/maximize/close buttons (see .title-bar-btn below) instead of
+   Electron's titleBarOverlay ones. */
 .title-bar {
-  height: 45px;
+  height: 40px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0 0.9rem;
+  padding: 0 0 0 0.9rem;
   background: #f2f6fb;
   -webkit-app-region: drag;
 }
 
 .title-bar-mark {
-  width: 1.7rem;
-  height: 1.7rem;
+  width: 1.85rem;
+  height: 1.85rem;
   border-radius: 0.3rem;
   flex-shrink: 0;
 }
 
 .title-bar-name {
-  font-size: 1.05rem;
+  font-size: 1.2rem;
   font-weight: 700;
   color: #1e293b;
   letter-spacing: -0.01em;
+  flex: 1;
+}
+
+.title-bar-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  flex-shrink: 0;
+  /* The buttons themselves need real clicks — without this, the parent
+     .title-bar's drag region swallows the mouse events before they ever
+     reach the buttons. */
+  -webkit-app-region: no-drag;
+}
+
+.title-bar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Matches .title-bar's own fixed 40px height exactly, so each button is
+     a perfect square rather than a tall rectangle — width in px, not rem,
+     since it has to track that fixed height value 1:1, not the font scale. */
+  width: 40px;
+  border: none;
+  background: none;
+  color: #475569;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.title-bar-btn:hover {
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.title-bar-btn:active {
+  background: rgba(15, 23, 42, 0.14);
+}
+
+.title-bar-btn-close:hover {
+  background: #e81123;
+  color: white;
+}
+
+.title-bar-btn-close:active {
+  background: #f1707a;
+  color: white;
 }
 
 /* --- Boot screen ----------------------------------------------------- */
@@ -707,6 +751,13 @@ body {
   border-top: 1px solid #f3f4f6;
 }
 
+.bottom-bar-last-updated {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
 .bottom-bar-refresh-btn {
   flex-shrink: 0;
   display: flex;
@@ -1215,4 +1266,250 @@ body {
 .idle-btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* --- Mini timer: floating always-on-top widget ----------------------------
+   Modeled on a VM guest's floating toolbar — small, dark, draggable by its
+   handle, sits above everything else while a task is being tracked. This
+   window is created with transparent:true in main.ts specifically so the
+   pill shape below can have real rounded corners against the desktop
+   instead of a visible rectangular window frame. */
+
+body.mini-timer-window {
+  background: transparent;
+}
+
+/* The actual OS window is bigger than the visible bar (see
+   MINI_TIMER_GLOW_MARGIN in main.ts) — this centers the bar inside that
+   extra transparent space, which exists specifically so the idle-warning
+   glow below has room to render past the bar's own edges instead of being
+   clipped at the window boundary. */
+.mini-timer-stage {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mini-timer {
+  height: 36px;
+  width: 440px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0 0.5rem 0 0.3rem;
+  background: #1e2430;
+  border-radius: 0.65rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  -webkit-app-region: no-drag;
+}
+
+/* The blinking dot alone was too easy to miss — this pulses a glow out
+   from the whole bar (into the transparent margin around it, see
+   .mini-timer-stage) so the warning reads at a glance instead of needing
+   to be staring right at a small dot. Amber for the first 7 of the last
+   10 seconds before idle, switching to a faster, further-reaching red
+   glow for the final 3 — genuinely more urgent, not just a color swap. */
+.mini-timer.warning {
+  animation: mini-timer-glow-amber 0.5s ease-in-out infinite alternate;
+}
+
+.mini-timer.critical {
+  animation: mini-timer-glow-red 0.3s ease-in-out infinite alternate;
+}
+
+@keyframes mini-timer-glow-amber {
+  from {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 0 0 rgba(245, 158, 11, 0.55);
+  }
+  to {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 20px 6px rgba(245, 158, 11, 0.55);
+  }
+}
+
+@keyframes mini-timer-glow-red {
+  from {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 0 0 rgba(239, 68, 68, 0.65);
+  }
+  to {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 25px 8px rgba(239, 68, 68, 0.65);
+  }
+}
+
+.mini-timer-handle {
+  flex-shrink: 0;
+  /* The actual draggable hit-box is much bigger than the six visible dots
+     — a target that small was nearly impossible to land a mousedown on
+     precisely, which is what made dragging feel broken even though the
+     drag region itself was configured correctly. The dots stay visually
+     small and centered inside this larger box. */
+  width: 1.6rem;
+  align-self: stretch;
+  margin: 0 0.1rem;
+  display: grid;
+  /* Fixed-size tracks (not 1fr) so the dot grid stays compact and
+     centered even though the box around it stretches to the full bar
+     height — 1fr rows would otherwise spread the dots apart to fill it. */
+  grid-template-columns: repeat(2, 0.16rem);
+  grid-template-rows: repeat(3, 0.16rem);
+  gap: 0.1rem;
+  justify-content: center;
+  align-content: center;
+  cursor: grab;
+  -webkit-app-region: drag;
+}
+
+.mini-timer-handle:active {
+  cursor: grabbing;
+}
+
+.mini-timer-handle-dot {
+  width: 0.16rem;
+  height: 0.16rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.mini-timer-toggle {
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease;
+}
+
+.mini-timer-toggle:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.mini-timer-pause-icon {
+  width: 0.55rem;
+  height: 0.55rem;
+  background:
+    linear-gradient(to right, white 0, white 30%, transparent 30%, transparent 70%, white 70%, white 100%);
+}
+
+.mini-timer-play-icon {
+  width: 0;
+  height: 0;
+  margin-left: 0.12rem;
+  border-top: 0.35rem solid transparent;
+  border-bottom: 0.35rem solid transparent;
+  border-left: 0.5rem solid white;
+}
+
+.mini-timer-dot {
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+}
+
+.mini-timer-dot.running {
+  background: #22c55e;
+}
+
+.mini-timer-dot.paused {
+  background: #94a3b8;
+}
+
+/* The last-10-seconds-before-idle warning — bigger than the normal dot
+   (not just a different color) plus a fast blink, in a color that reads
+   as "heads up" rather than "still fine". Paired with the whole bar's own
+   glow (see .mini-timer.warning) so this isn't the only thing carrying
+   the warning. */
+.mini-timer-dot.warning {
+  width: 0.85rem;
+  height: 0.85rem;
+  background: #f59e0b;
+  animation: mini-timer-warning-blink 0.5s step-start infinite;
+}
+
+/* The final 3 seconds before idle — red, and blinking noticeably faster
+   than the amber warning, so it reads as more urgent rather than just a
+   different color at the same pace. */
+.mini-timer-dot.critical {
+  width: 0.85rem;
+  height: 0.85rem;
+  background: #ef4444;
+  animation: mini-timer-warning-blink 0.3s step-start infinite;
+}
+
+@keyframes mini-timer-warning-blink {
+  50% {
+    opacity: 0.15;
+  }
+}
+
+.mini-timer-task {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: white;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-timer-clock {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: white;
+  font-variant-numeric: tabular-nums;
+}
+
+.mini-timer-close {
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.mini-timer-close:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+}
+
+.mini-timer-close-icon {
+  position: relative;
+  width: 0.6rem;
+  height: 0.6rem;
+}
+
+.mini-timer-close-icon::before,
+.mini-timer-close-icon::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 1px;
+  background: currentColor;
+}
+
+.mini-timer-close-icon::before {
+  transform: rotate(45deg);
+}
+
+.mini-timer-close-icon::after {
+  transform: rotate(-45deg);
 }

@@ -104,10 +104,21 @@ function formatDueDate(dueDate: string): string {
   return new Date(dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function findTaskInfo(groups: ProjectGroup[], taskId: string): { projectName: string; title: string } | null {
+// "09/18/2026 05:41 PM" — matches the reference UI's "Last updated at"
+// stamp next to the refresh control.
+function formatLastUpdated(date: Date): string {
+  const datePart = date.toLocaleDateString(undefined, { month: "2-digit", day: "2-digit", year: "numeric" });
+  const timePart = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: true });
+  return `${datePart} ${timePart}`;
+}
+
+function findTaskInfo(
+  groups: ProjectGroup[],
+  taskId: string,
+): { projectName: string; title: string; todaySeconds: number } | null {
   for (const group of groups) {
     const task = group.tasks.find((t) => t.id === taskId);
-    if (task) return { projectName: group.name, title: task.title };
+    if (task) return { projectName: group.name, title: task.title, todaySeconds: task.todaySeconds };
   }
   return null;
 }
@@ -135,11 +146,18 @@ export function App() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [search, setSearch] = useState("");
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [idleAlert, setIdleAlert] = useState<IdleAlertState | null>(null);
+  // Set when the floating mini-timer widget's own pause button is used —
+  // distinct from a full Stop: the session's time is already folded into
+  // the task's total (see handleMiniTimerPause), but the widget stays
+  // visible with a Resume button rather than disappearing, and this is
+  // what that button restarts.
+  const [pausedTask, setPausedTask] = useState<{ id: string; title: string; projectName: string } | null>(null);
   // Elapsed seconds banked from earlier segments of the *same* continuous
   // task session — carried forward across a discard-and-resume idle split
   // (see handleIdleDialogResume), reset to 0 whenever a genuinely new task
@@ -164,6 +182,11 @@ export function App() {
         projectName: value.projectName,
         taskName: value.taskName,
       });
+      // The idle dialog is about to take over attention — the mini-timer
+      // widget disappears rather than sitting there ticking on top of it.
+      // It comes back explicitly wherever the dialog resolves in a way
+      // that keeps tracking alive (see handleIdleDialogResume).
+      window.timeStaff.miniTimer.hide();
     } else {
       window.timeStaff.idleAlert.hide();
     }
@@ -257,6 +280,7 @@ export function App() {
           setScreenshotIntervalSec(settings.screenshotIntervalSec);
         }
       }
+      setLastUpdatedAt(new Date());
     } catch (err) {
       setError(apiErrorMessage(err, "Couldn't reach the TimeStaff backend at localhost:5000."));
     } finally {
@@ -310,10 +334,19 @@ export function App() {
   }
 
   async function handleLogout() {
+    if (running) {
+      try {
+        await stopTimer(running.id);
+      } catch {
+        // Best-effort — logging out regardless.
+      }
+    }
     await apiLogout();
     setUser(null);
     setRunning(null);
     setProjectGroups([]);
+    setPausedTask(null);
+    window.timeStaff.miniTimer.hide();
   }
 
   // Timer tick + idle detection while a timer is running. Displayed elapsed
@@ -357,7 +390,33 @@ export function App() {
         return;
       }
 
-      setElapsedSeconds(sessionElapsedBaseSec + Math.floor((Date.now() - startedAt) / 1000));
+      const tickElapsed = sessionElapsedBaseSec + Math.floor((Date.now() - startedAt) / 1000);
+      setElapsedSeconds(tickElapsed);
+
+      // Warn on the mini-timer widget for the last 10 seconds before idle
+      // actually triggers — amber for the first 7 of those, switching to a
+      // more urgent red for the final 3 — instead of the steady green, so
+      // it's a heads-up rather than indistinguishable from normal ticking.
+      // Naturally clears the moment real activity resets idleSeconds, no
+      // separate timeout to manage.
+      const secondsUntilIdle = idleThresholdSec - idleSeconds;
+      const miniTimerStatus =
+        secondsUntilIdle > 0 && secondsUntilIdle <= 3
+          ? "idle-critical"
+          : secondsUntilIdle > 3 && secondsUntilIdle <= 10
+            ? "idle-warning"
+            : "running";
+      const taskInfo = findTaskInfo(projectGroups, running.taskId);
+      window.timeStaff.miniTimer.update({
+        taskName: taskInfo?.title ?? running.task?.title ?? "—",
+        projectName: taskInfo?.projectName ?? running.task?.project.name ?? "—",
+        // Same total the main window's status bar shows (today's total for
+        // this task, plus the live session) — not just this session's own
+        // elapsed time, which used to make the widget's clock disagree
+        // with the app.
+        elapsedSeconds: (taskInfo?.todaySeconds ?? 0) + tickElapsed,
+        status: miniTimerStatus,
+      });
     }, 1000);
 
     return () => clearInterval(interval);
@@ -401,6 +460,115 @@ export function App() {
 
     return () => clearInterval(interval);
   }, [running, screenshotIntervalSec]);
+
+  // Shows the mini-timer widget whenever a genuinely new/different entry
+  // starts running — covers handleSwitchTask, handleMiniTimerResume, and
+  // the idle dialog's "no, discard and restart" path uniformly, since all
+  // three end in a fresh `running.id`. Deliberately keyed on just the id,
+  // not `running` itself, so it doesn't re-fire on every tick. It never
+  // hides the widget on its own — pausing also sets `running` to null, but
+  // the widget has to stay up with a Resume button, not disappear, so
+  // hiding is always an explicit call at the specific places that mean it
+  // (Stop, app close, idle dialog appearing).
+  useEffect(() => {
+    if (!running) return;
+    const taskInfo = findTaskInfo(projectGroups, running.taskId);
+    window.timeStaff.miniTimer.show({
+      taskName: taskInfo?.title ?? running.task?.title ?? "—",
+      projectName: taskInfo?.projectName ?? running.task?.project.name ?? "—",
+      elapsedSeconds: (taskInfo?.todaySeconds ?? 0) + elapsedSeconds,
+      status: "running",
+    });
+  }, [running?.id]);
+
+  // Closing the main window is the app's only "I'm done" signal — main.ts
+  // defers the actual close until this confirms, giving the stop request
+  // time to land before the window (and its auth/API context) disappears.
+  useEffect(() => {
+    return window.timeStaff.onBeforeClose(async () => {
+      if (running) {
+        try {
+          await stopTimer(running.id);
+        } catch {
+          // Best-effort — the window is closing regardless.
+        }
+      }
+      window.timeStaff.confirmReadyToClose();
+    });
+  }, [running]);
+
+  // The floating mini-timer widget's pause/resume button has no logic of
+  // its own — reported back through main exactly like the idle-alert
+  // window's choices are. "dismiss" (its X) is handled entirely in
+  // main.ts and never reaches here, since it's a pure visibility change
+  // with no timer-state consequence.
+  useEffect(() => {
+    return window.timeStaff.miniTimer.onAction((action) => {
+      if (action === "pause") handleMiniTimerPause();
+      else if (action === "resume") handleMiniTimerResume();
+    });
+  }, [running, pausedTask, projectGroups, elapsedSeconds]);
+
+  // Pausing from the widget stops the current entry — its time is folded
+  // into the task's total exactly like a full Stop — but keeps the widget
+  // itself visible with a Resume button, instead of disappearing like a
+  // real Stop does. The displayed clock is deliberately left as-is (not
+  // reset to 0): frozen at wherever it was when paused, so resuming reads
+  // as a continuation rather than a restart.
+  async function handleMiniTimerPause() {
+    if (!running) return;
+    setBusy(true);
+    setError(null);
+    const taskId = running.taskId;
+    const fallbackTask = running.task;
+    try {
+      await stopTimer(running.id);
+      foldElapsedIntoTask(taskId, elapsedSeconds);
+      const taskInfo = findTaskInfo(projectGroups, taskId);
+      const paused = {
+        id: taskId,
+        title: taskInfo?.title ?? fallbackTask?.title ?? "—",
+        projectName: taskInfo?.projectName ?? fallbackTask?.project.name ?? "—",
+      };
+      setPausedTask(paused);
+      setRunning(null);
+      setSessionElapsedBaseSec(0);
+      window.timeStaff.miniTimer.update({
+        taskName: paused.title,
+        projectName: paused.projectName,
+        // taskInfo.todaySeconds is the pre-fold total (the projectGroups
+        // state update from foldElapsedIntoTask above hasn't landed yet at
+        // this point) — adding this session's elapsedSeconds here gives
+        // the same post-fold total without waiting a render for it.
+        elapsedSeconds: (taskInfo?.todaySeconds ?? 0) + elapsedSeconds,
+        status: "paused",
+      });
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't pause the timer."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Resuming starts a fresh entry for the same task — the widget's "show"
+  // effect above picks this up automatically once `running` gets a new id,
+  // and the displayed total stays correct because the paused segment is
+  // already folded into the task's todaySeconds.
+  async function handleMiniTimerResume() {
+    if (!pausedTask) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const entry = await startTimer(pausedTask.id);
+      setRunning(entry);
+      setSessionElapsedBaseSec(0);
+      setPausedTask(null);
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't resume the timer."));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function resolveIdleStop(idleSeconds: number) {
     if (!running) return;
@@ -467,6 +635,16 @@ export function App() {
     setNotice(null);
 
     if (wasWorking === "yes") {
+      // The same entry just kept running the whole time — running.id never
+      // changes here, so nothing else would naturally bring the mini-timer
+      // widget back after setIdleAlertBoth hid it; show it explicitly.
+      const taskInfo = findTaskInfo(projectGroups, running.taskId);
+      window.timeStaff.miniTimer.show({
+        taskName: taskInfo?.title ?? running.task?.title ?? "—",
+        projectName: taskInfo?.projectName ?? running.task?.project.name ?? "—",
+        elapsedSeconds: (taskInfo?.todaySeconds ?? 0) + elapsedSeconds,
+        status: "running",
+      });
       return;
     }
 
@@ -498,7 +676,7 @@ export function App() {
         handleIdleDialogResume(wasWorking);
       }
     });
-  }, [idleAlert, running]);
+  }, [idleAlert, running, projectGroups]);
 
   async function handleSwitchTask(taskId: string) {
     // Clicking the task that's already running is how you stop it — matches
@@ -523,6 +701,10 @@ export function App() {
       const entry = await startTimer(taskId);
       setRunning(entry);
       setSessionElapsedBaseSec(0);
+      // Starting a genuinely different task while something else was
+      // paused abandons that pause — its time is already safely folded
+      // into its own task's total, so there's nothing left to lose here.
+      setPausedTask(null);
     } catch (err) {
       setError(apiErrorMessage(err, "Couldn't start the timer for that task."));
     } finally {
@@ -540,6 +722,8 @@ export function App() {
       setRunning(null);
       setElapsedSeconds(0);
       setSessionElapsedBaseSec(0);
+      setPausedTask(null);
+      window.timeStaff.miniTimer.hide();
     } catch (err) {
       setError(apiErrorMessage(err, "Couldn't stop the timer."));
     } finally {
@@ -824,6 +1008,10 @@ export function App() {
 
         <span className="status-bar-spacer" />
 
+        {lastUpdatedAt && (
+          <span className="bottom-bar-last-updated">Last updated at: {formatLastUpdated(lastUpdatedAt)}</span>
+        )}
+
         <button
           className="bottom-bar-refresh-btn"
           onClick={handleRefresh}
@@ -855,12 +1043,26 @@ export function App() {
 // A custom-drawn replacement for the native OS title bar (see the
 // `titleBarStyle: 'hidden'` window option in main.ts) — the native one
 // can't be restyled at all, so to make it match the app's background,
-// height and font, the app has to draw its own draggable strip and let
-// Electron's titleBarOverlay redraw just the min/max/close buttons on top
-// of it in matching colors.
+// height and font, the app draws its own draggable strip here, including
+// its own minimize/maximize/close buttons (rather than Electron's
+// titleBarOverlay ones, whose minimize/maximize hover state Windows
+// renders too faintly to see against a light background — only the close
+// button's hover is hard-coded red by the OS regardless).
 function TitleBar() {
+  const [isMaximized, setIsMaximized] = useState(false);
+  // macOS always draws its own traffic-light buttons in 'hidden' mode
+  // regardless of anything we do — rendering a second set here would just
+  // duplicate/conflict with them.
+  const showControls = window.timeStaff.platform !== "darwin";
+
+  useEffect(() => {
+    if (!showControls) return;
+    window.timeStaff.windowControls.isMaximized().then(setIsMaximized);
+    return window.timeStaff.windowControls.onMaximizedChanged(setIsMaximized);
+  }, [showControls]);
+
   return (
-    <div className="title-bar">
+    <div className="title-bar" onDoubleClick={() => showControls && window.timeStaff.windowControls.maximizeToggle()}>
       <svg className="title-bar-mark" viewBox="0 0 32 32" fill="none" aria-hidden>
         <rect width="32" height="32" rx="7" fill="#4F46E5" />
         <rect x="13.5" y="3" width="5" height="3" rx="1.2" fill="#fff" />
@@ -870,6 +1072,48 @@ function TitleBar() {
         <line x1="16" y1="18.5" x2="20" y2="18.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
       </svg>
       <span className="title-bar-name">TimeStaff</span>
+      {showControls && (
+        <div className="title-bar-controls">
+          <button
+            className="title-bar-btn"
+            onClick={() => window.timeStaff.windowControls.minimize()}
+            title="Minimize"
+            aria-label="Minimize"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+              <line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" strokeWidth="1" />
+            </svg>
+          </button>
+          <button
+            className="title-bar-btn"
+            onClick={() => window.timeStaff.windowControls.maximizeToggle()}
+            title={isMaximized ? "Restore" : "Maximize"}
+            aria-label={isMaximized ? "Restore" : "Maximize"}
+          >
+            {isMaximized ? (
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+                <rect x="2" y="0.5" width="7" height="7" stroke="currentColor" strokeWidth="1" fill="none" />
+                <path d="M0.5 2.5V9.5H7.5" stroke="currentColor" strokeWidth="1" fill="none" />
+              </svg>
+            ) : (
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+                <rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" />
+              </svg>
+            )}
+          </button>
+          <button
+            className="title-bar-btn title-bar-btn-close"
+            onClick={() => window.timeStaff.windowControls.close()}
+            title="Close"
+            aria-label="Close"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+              <line x1="0.5" y1="0.5" x2="9.5" y2="9.5" stroke="currentColor" strokeWidth="1" />
+              <line x1="9.5" y1="0.5" x2="0.5" y2="9.5" stroke="currentColor" strokeWidth="1" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

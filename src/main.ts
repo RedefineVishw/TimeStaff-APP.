@@ -47,6 +47,22 @@ if (started) {
 ipcMain.handle('get-idle-seconds', () => powerMonitor.getSystemIdleTime());
 ipcMain.handle('open-external', (_event, url: string) => shell.openExternal(url));
 
+// Custom window controls — the renderer draws its own minimize/maximize/
+// close buttons (see .title-bar-controls in App.tsx) instead of relying on
+// Electron's titleBarOverlay, because Windows' own hover styling for that
+// overlay's minimize/maximize buttons is barely visible against a light
+// title bar background (only the close button's red hover is guaranteed
+// visible — that one's hard-coded by the OS). Drawing the buttons
+// ourselves means full control over every button's hover/active state.
+ipcMain.on('window:minimize', () => mainWindow?.minimize());
+ipcMain.on('window:maximize-toggle', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  else mainWindow.maximize();
+});
+ipcMain.on('window:close', () => mainWindow?.close());
+ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false);
+
 // The desktop app's session is independent of the web app's — it stores its
 // own refresh token here, encrypted at rest via Electron's built-in
 // safeStorage (OS keychain-backed on Windows/macOS, libsecret on Linux), in
@@ -125,6 +141,13 @@ ipcMain.handle('notify-screenshot-captured', () => {
 
 let mainWindow: BrowserWindow | null = null;
 let idleAlertWindow: BrowserWindow | null = null;
+let miniTimerWindow: BrowserWindow | null = null;
+let closeConfirmed = false;
+
+ipcMain.on('app:ready-to-close', () => {
+  closeConfirmed = true;
+  mainWindow?.close();
+});
 
 function rendererUrl(hash: string): string {
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
@@ -144,19 +167,13 @@ const createWindow = () => {
     backgroundColor: '#f2f6fb',
     // The default native title bar is dark and unstylable from CSS —
     // 'hidden' removes it and lets the renderer draw its own title strip
-    // (see the ".title-bar" element in App.tsx) at the app's own background
-    // color, with just the minimize/maximize/close buttons redrawn by the
-    // OS in titleBarOverlay's colors. macOS ignores titleBarOverlay's color
-    // fields (it always draws its own traffic-light buttons) but honors
-    // 'hidden' itself, which is enough to remove the dark bar there too.
+    // (see ".title-bar" in App.tsx), including its own minimize/maximize/
+    // close buttons wired to the IPC handlers above, instead of Windows'
+    // titleBarOverlay buttons (whose minimize/maximize hover state Windows
+    // renders too faintly to see against a light background). macOS
+    // ignores this and always draws its own traffic-light buttons in
+    // 'hidden' mode regardless, which is the platform's own convention.
     titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#f2f6fb',
-      symbolColor: '#334155',
-      // Must match .title-bar's height in index.css or the native
-      // minimize/maximize/close buttons won't line up with it vertically.
-      height: 45,
-    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
     },
@@ -171,12 +188,42 @@ const createWindow = () => {
     );
   }
 
+  // The maximize/restore button's icon needs to reflect the window's
+  // actual state, which can change from things other than that button
+  // itself (double-clicking the title bar, dragging to the screen edge,
+  // Windows' snap layouts) — pushed to the renderer whenever it changes
+  // rather than only updated optimistically on click.
+  mainWindow.on('maximize', () => mainWindow?.webContents.send('window:maximized-changed', true));
+  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window:maximized-changed', false));
+
   // A hidden idle-alert window still counts toward getAllWindows(), which
   // would otherwise stop the app from quitting when the main window closes
   // — close it explicitly alongside the main window.
   mainWindow.on('closed', () => {
     idleAlertWindow?.close();
+    miniTimerWindow?.close();
     mainWindow = null;
+  });
+
+  // Closing the main window is this app's only "I'm done" signal (there's
+  // no tray icon to keep it running headless) — so it has to actually stop
+  // whatever timer is running first, and that's an async API call that
+  // only the renderer can make (it owns the authenticated axios instance).
+  // The first 'close' is intercepted and deferred until the renderer
+  // confirms the stop request finished (see the module-level
+  // 'app:ready-to-close' handler below); a short fallback timeout covers a
+  // renderer that never responds (crashed, stuck) so the window can't get
+  // stuck refusing to close.
+  closeConfirmed = false;
+  mainWindow.on('close', (event) => {
+    if (closeConfirmed) return;
+    event.preventDefault();
+    mainWindow?.webContents.send('app:before-close');
+    setTimeout(() => {
+      if (closeConfirmed) return;
+      closeConfirmed = true;
+      mainWindow?.close();
+    }, 3000);
   });
 };
 
@@ -246,6 +293,143 @@ ipcMain.on('idle-alert:hide', () => {
 ipcMain.on('idle-alert:respond', (_event, response: { action: 'stop' | 'resume'; wasWorking: 'no' | 'yes' }) => {
   mainWindow?.webContents.send('idle-alert:response', response);
   idleAlertWindow?.hide();
+});
+
+// --- Mini timer: a small always-on-top overlay showing whatever task is
+// currently tracked, so you don't need the main window open/focused to see
+// it — modeled on a VM guest's floating "you're inside a VM" toolbar. Like
+// the idle-alert window, this one has no logic of its own: the main
+// window's renderer decides what it shows and reacts to its buttons; this
+// just displays data and reports clicks back.
+
+// The visible bar's own size — the actual BrowserWindow is bigger than
+// this (see MINI_TIMER_GLOW_MARGIN below), with transparent space around
+// the bar so its idle-warning glow has somewhere to render into instead of
+// being clipped at the window's edge.
+const MINI_TIMER_WIDTH = 440;
+const MINI_TIMER_HEIGHT = 36;
+// 25px covers the bigger of the two glows (the last-3-seconds red one) —
+// the milder amber warning glow reaches less far but fits fine within this.
+const MINI_TIMER_GLOW_MARGIN = 25;
+const MINI_TIMER_WINDOW_WIDTH = MINI_TIMER_WIDTH + MINI_TIMER_GLOW_MARGIN * 2;
+const MINI_TIMER_WINDOW_HEIGHT = MINI_TIMER_HEIGHT + MINI_TIMER_GLOW_MARGIN * 2;
+const MINI_TIMER_POSITION_FILE = () => path.join(app.getPath('userData'), 'mini-timer-position.json');
+
+async function loadMiniTimerPosition(): Promise<{ x: number; y: number } | null> {
+  try {
+    const raw = await fs.readFile(MINI_TIMER_POSITION_FILE(), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return parsed;
+  } catch {
+    // No saved position yet, or it's corrupt — fall through to the default.
+  }
+  return null;
+}
+
+function saveMiniTimerPosition(x: number, y: number) {
+  // Fire-and-forget — losing one position save isn't worth surfacing, the
+  // widget just falls back to the default spot next launch.
+  fs.writeFile(MINI_TIMER_POSITION_FILE(), JSON.stringify({ x, y })).catch(() => {
+    // See the comment above — losing a position save is fine.
+  });
+}
+
+function defaultMiniTimerPosition(): { x: number; y: number } {
+  const { workArea } = screen.getPrimaryDisplay();
+  // Centers the visible *bar*, not the (larger, invisible) window around
+  // it — subtracting the glow margin so the extra transparent space is
+  // evenly split on both sides rather than skewing the bar off-center.
+  return {
+    x: Math.round(workArea.x + (workArea.width - MINI_TIMER_WIDTH) / 2 - MINI_TIMER_GLOW_MARGIN),
+    y: workArea.y + 16 - MINI_TIMER_GLOW_MARGIN,
+  };
+}
+
+async function createMiniTimerWindow() {
+  const position = (await loadMiniTimerPosition()) ?? defaultMiniTimerPosition();
+  miniTimerWindow = new BrowserWindow({
+    width: MINI_TIMER_WINDOW_WIDTH,
+    height: MINI_TIMER_WINDOW_HEIGHT,
+    x: position.x,
+    y: position.y,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+  // 'screen-saver' is the same level the idle alert uses — high enough to
+  // stay visible over a full-screen app, which is the whole point of a
+  // widget meant to be glanceable while you're working in something else.
+  miniTimerWindow.setAlwaysOnTop(true, 'screen-saver');
+  miniTimerWindow.loadURL(rendererUrl('mini-timer'));
+
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  miniTimerWindow.on('moved', () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (!miniTimerWindow) return;
+      const [x, y] = miniTimerWindow.getPosition();
+      saveMiniTimerPosition(x, y);
+    }, 400);
+  });
+  miniTimerWindow.on('closed', () => {
+    miniTimerWindow = null;
+  });
+}
+
+interface MiniTimerData {
+  taskName: string;
+  projectName: string;
+  elapsedSeconds: number;
+  status: 'running' | 'paused' | 'idle-warning' | 'idle-critical';
+}
+
+ipcMain.on('mini-timer:show', async (_event, data: MiniTimerData) => {
+  if (!miniTimerWindow || miniTimerWindow.isDestroyed()) {
+    await createMiniTimerWindow();
+  }
+  const win = miniTimerWindow!;
+  const show = () => {
+    win.webContents.send('mini-timer:data', data);
+    win.showInactive(); // doesn't steal focus from whatever app you're actually working in
+  };
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', show);
+  } else {
+    show();
+  }
+});
+
+// Ticks/status changes while it's already showing — no window
+// creation/positioning work needed, just fresh data.
+ipcMain.on('mini-timer:update', (_event, data: MiniTimerData) => {
+  miniTimerWindow?.webContents.send('mini-timer:data', data);
+});
+
+ipcMain.on('mini-timer:hide', () => {
+  miniTimerWindow?.hide();
+});
+
+// The widget's own buttons have no logic of their own either — forwarded
+// to the main window's renderer (where the real pause/resume/API logic
+// lives) exactly like idle-alert:respond above. "dismiss" (the X) is the
+// one action this process can fully handle itself, since it's purely a
+// visibility change with no timer-state consequence.
+ipcMain.on('mini-timer:action', (_event, action: 'pause' | 'resume' | 'dismiss') => {
+  if (action === 'dismiss') {
+    miniTimerWindow?.hide();
+    return;
+  }
+  mainWindow?.webContents.send('mini-timer:action', action);
 });
 
 app.on('ready', createWindow);
