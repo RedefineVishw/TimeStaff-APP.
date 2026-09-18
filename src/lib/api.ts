@@ -151,6 +151,7 @@ export interface Task {
   projectId: string;
   parentId: string | null;
   title: string;
+  description: string | null;
   status: string;
   assigneeId: string | null;
   startDate: string | null;

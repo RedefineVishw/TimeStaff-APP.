@@ -24,6 +24,7 @@ const WEB_DASHBOARD_URL = "http://localhost:3000";
 interface MyTask {
   id: string;
   title: string;
+  description: string | null;
   todaySeconds: number;
   dueDate: string | null;
 }
@@ -63,14 +64,6 @@ function formatClock(totalSeconds: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
-// Compact "h:mm" used for the per-project/per-task today totals in the
-// sidebar, matching the reference UI's style (e.g. "4:48").
-function formatCompact(totalSeconds: number): string {
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  return `${h}:${m.toString().padStart(2, "0")}`;
-}
-
 // The org admin can configure the idle threshold as low as 15s (see the
 // tracking-settings range), so "round to whole minutes" silently displayed
 // "0 min" for any sub-minute value — show seconds below a minute instead.
@@ -89,7 +82,10 @@ function flattenLeafTasks(tasks: Task[]): Task[] {
   return leaves;
 }
 
-const PROJECT_COLORS = ["#4f46e5", "#059669", "#d97706", "#db2777", "#0891b2", "#7c3aed", "#dc2626", "#65a30d"];
+// Red is deliberately excluded — it's reserved for the Stop button and
+// overdue/error states elsewhere in this UI, so a red project dot would
+// read as a warning instead of just being that project's color.
+const PROJECT_COLORS = ["#6366f1", "#3b82f6", "#16a34a", "#f59e0b", "#ec4899", "#64748b", "#0891b2", "#8b5cf6"];
 function colorForProject(projectId: string) {
   let hash = 0;
   for (let i = 0; i < projectId.length; i++) hash = (hash * 31 + projectId.charCodeAt(i)) >>> 0;
@@ -100,6 +96,12 @@ function startOfToday(): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   return d;
+}
+
+// "Sep 20" — short enough for a fixed-height row, still a real date rather
+// than a made-up placeholder.
+function formatDueDate(dueDate: string): string {
+  return new Date(dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function findTaskInfo(groups: ProjectGroup[], taskId: string): { projectName: string; title: string } | null {
@@ -126,7 +128,7 @@ export function App() {
   const [bootstrapping, setBootstrapping] = useState(true);
 
   const [projectGroups, setProjectGroups] = useState<ProjectGroup[]>([]);
-  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [running, setRunning] = useState<RunningTimeEntry | null>(null);
   const [idleThresholdSec, setIdleThresholdSec] = useState(300);
   const [screenshotIntervalSec, setScreenshotIntervalSec] = useState(300);
@@ -136,6 +138,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [idleAlert, setIdleAlert] = useState<IdleAlertState | null>(null);
   // Elapsed seconds banked from earlier segments of the *same* continuous
   // task session — carried forward across a discard-and-resume idle split
@@ -228,6 +231,7 @@ export function App() {
         const tasks: MyTask[] = myLeafTasks.map((t) => ({
           id: t.id,
           title: t.title,
+          description: t.description,
           todaySeconds: secondsByTask.get(t.id) ?? 0,
           dueDate: t.dueDate,
         }));
@@ -242,9 +246,9 @@ export function App() {
       setRunning(current);
 
       // Land on whichever project has the running task, or the first one —
-      // matches the reference UI always showing one project's tasks open.
+      // matches the reference UI always showing one project selected.
       const runningProjectId = current ? groups.find((g) => g.tasks.some((t) => t.id === current.taskId))?.id : null;
-      setExpandedProjectId(runningProjectId ?? groups[0]?.id ?? null);
+      setSelectedProjectId(runningProjectId ?? groups[0]?.id ?? null);
 
       if (currentUser.organizationId) {
         const settings = await fetchTrackingSettings(currentUser.organizationId).catch(() => null);
@@ -263,6 +267,27 @@ export function App() {
   async function handleLoginSuccess(loggedInUser: AuthUser) {
     setUser(loggedInUser);
     await loadWorkspace(loggedInUser);
+  }
+
+  // Folds a just-finished session's duration into the task's (and its
+  // project's) `todaySeconds` right away — without this, a task's total
+  // only ever updated on the next full Refresh/reload, so stopping a timer
+  // and starting it again looked like it "forgot" every session before the
+  // current one, and the project header (which never added the live
+  // elapsedSeconds in the first place) stayed stuck wherever it was at
+  // load time.
+  function foldElapsedIntoTask(taskId: string, seconds: number) {
+    if (seconds <= 0) return;
+    setProjectGroups((groups) =>
+      groups.map((g) => {
+        if (!g.tasks.some((t) => t.id === taskId)) return g;
+        return {
+          ...g,
+          todaySeconds: g.todaySeconds + seconds,
+          tasks: g.tasks.map((t) => (t.id === taskId ? { ...t, todaySeconds: t.todaySeconds + seconds } : t)),
+        };
+      }),
+    );
   }
 
   const [refreshing, setRefreshing] = useState(false);
@@ -385,6 +410,10 @@ export function App() {
     } catch {
       // Nothing more we can do here — leave it to the user to stop manually.
     }
+    // elapsedSeconds is exactly the worked duration here — the clock was
+    // frozen at the pre-idle value the moment idle was detected, which is
+    // the same instant idleSince truncates the entry to server-side.
+    foldElapsedIntoTask(running.taskId, elapsedSeconds);
     setRunning(null);
     setElapsedSeconds(0);
     setSessionElapsedBaseSec(0);
@@ -406,6 +435,12 @@ export function App() {
       } catch {
         // Leave it to the user to stop manually if this failed.
       }
+      // Approximate: elapsedSeconds is frozen at the pre-idle value, but
+      // this branch tells the server to count the idle+dialog stretch as
+      // worked too (no idleSince truncation), so the true duration is
+      // slightly higher than this. Close enough for the live display; the
+      // next Refresh reconciles it exactly from the server.
+      foldElapsedIntoTask(running.taskId, elapsedSeconds);
       setRunning(null);
       setElapsedSeconds(0);
       setSessionElapsedBaseSec(0);
@@ -466,7 +501,21 @@ export function App() {
   }, [idleAlert, running]);
 
   async function handleSwitchTask(taskId: string) {
-    if (running?.taskId === taskId) return;
+    // Clicking the task that's already running is how you stop it — matches
+    // Hubstaff's play/stop toggle instead of silently doing nothing, which
+    // was the actual bug behind "I can't tell if the task is on or off".
+    if (running?.taskId === taskId) {
+      await handleStop();
+      return;
+    }
+    // Switching straight to a different task while one is already running
+    // — the backend auto-stops the old entry server-side, but the old
+    // task's just-finished session still needs folding into local state
+    // here too, or it'd vanish from the display exactly like the
+    // plain-Stop case until the next Refresh.
+    if (running) {
+      foldElapsedIntoTask(running.taskId, elapsedSeconds);
+    }
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -487,6 +536,7 @@ export function App() {
     setError(null);
     try {
       await stopTimer(running.id);
+      foldElapsedIntoTask(running.taskId, elapsedSeconds);
       setRunning(null);
       setElapsedSeconds(0);
       setSessionElapsedBaseSec(0);
@@ -497,17 +547,13 @@ export function App() {
     }
   }
 
-  function handleToggleProject(projectId: string) {
-    setExpandedProjectId((current) => (current === projectId ? null : projectId));
-  }
-
-  // Searching flattens the accordion — every project with a name or task
-  // match shows expanded, so you can jump straight to a task without first
-  // hunting for which project it's under.
+  // Searching surfaces matching tasks across every project at once (shown
+  // grouped by project on the right) instead of requiring you to first pick
+  // the right project from the sidebar.
   const isSearching = search.trim().length > 0;
-  const filteredGroups = useMemo(() => {
+  const searchResultGroups = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return projectGroups;
+    if (!q) return [];
     return projectGroups
       .map((g) => ({
         ...g,
@@ -522,185 +568,366 @@ export function App() {
       )
     : null;
 
+  // The right panel always shows exactly one project's task list — never a
+  // duplicate of everything already in the sidebar. It defaults to whichever
+  // project currently has the running task, then falls back to the first
+  // project, so landing on the app always shows something relevant.
+  const selectedProject =
+    projectGroups.find((g) => g.id === selectedProjectId) ??
+    projectGroups.find((g) => g.tasks.some((t) => t.id === running?.taskId)) ??
+    projectGroups[0] ??
+    null;
+
+  // A project's stored todaySeconds only covers already-completed sessions
+  // — it needs the live elapsedSeconds added on top while one of its tasks
+  // is the one currently running, or the project total (sidebar row and
+  // the task panel's header) just sits frozen at whatever it was on load
+  // instead of ticking with the clock.
+  function liveProjectSeconds(group: ProjectGroup): number {
+    const isRunningHere = !!running && group.tasks.some((t) => t.id === running.taskId);
+    return group.todaySeconds + (isRunningHere ? elapsedSeconds : 0);
+  }
+
   if (bootstrapping) {
     return (
-      <div className="boot-screen">
-        <div className="spinner" />
-      </div>
+      <>
+        <TitleBar />
+        <div className="boot-screen">
+          <div className="spinner" />
+        </div>
+      </>
     );
   }
 
   if (!user) {
-    return <Login onSuccess={handleLoginSuccess} />;
+    return (
+      <>
+        <TitleBar />
+        <Login onSuccess={handleLoginSuccess} />
+      </>
+    );
   }
 
+  const runningRowSeconds = running ? currentTask ? currentTask.todaySeconds + elapsedSeconds : elapsedSeconds : 0;
+
   return (
+    <>
+    <TitleBar />
     <div className="app-shell">
-      <aside className="task-panel">
-        <div className="task-panel-header">
-          <svg className="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden>
-            <rect width="32" height="32" rx="7" fill="#4F46E5" />
-            <rect x="13.5" y="3" width="5" height="3" rx="1.2" fill="#fff" />
-            <rect x="20.3" y="5" width="4" height="2.6" rx="1" fill="#fff" transform="rotate(45 22.3 6.3)" />
-            <circle cx="16" cy="18.5" r="10" fill="none" stroke="#fff" strokeWidth="2.3" />
-            <line x1="16" y1="18.5" x2="16" y2="12.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
-            <line x1="16" y1="18.5" x2="20" y2="18.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
-          </svg>
-          <span className="brand-name">TimeStaff</span>
-          <button
-            className="refresh-btn"
-            onClick={handleRefresh}
-            disabled={refreshing || loadingWorkspace}
-            title="Refresh tasks"
+      {/* Fixed-height status bar, always rendered — idle or running, it's the
+          same element with different content, never mounted/unmounted. That
+          was the actual cause of the "dancing" layout: a conditionally
+          rendered timer strip used to appear/disappear and shove everything
+          below it up and down every time a timer started or stopped. */}
+      <div className="status-bar">
+        <div className="status-bar-center">
+          <span
+            className={`status-pill ${running ? "running" : "idle"}`}
+            title={`Idle time is discarded after ${formatDurationLabel(idleThresholdSec)} of inactivity`}
           >
-            <svg
-              className={refreshing || loadingWorkspace ? "spin" : ""}
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.3"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-              <path d="M21 4v6h-6" />
+            <span className="status-pill-dot" />
+            {running ? "Running" : "Idle"}
+          </span>
+          <span className="status-clock">{formatClock(runningRowSeconds)}</span>
+          <span className="status-divider" />
+          <span className="status-field">
+            <span className="status-field-label">Project</span>
+            <span className="status-field-value">{currentTask?.projectName ?? "No project selected"}</span>
+          </span>
+          <span className="status-divider status-divider-wide" />
+          <span className="status-field">
+            <span className="status-field-label">Task</span>
+            <span className="status-field-value">{currentTask?.title ?? "No task selected"}</span>
+          </span>
+        </div>
+        <button
+          className="status-stop-btn"
+          onClick={handleStop}
+          disabled={!running || busy}
+          title="Stop timer"
+        >
+          <span className="status-stop-icon" />
+          Stop
+        </button>
+      </div>
+
+      <div className="app-body">
+        <aside className="sidebar">
+          <label className="sidebar-search">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <circle cx="11" cy="11" r="7" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+            <input
+              placeholder="Search projects..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </label>
+
+          <div className="sidebar-projects-head">
+            <span className="sidebar-projects-label">Projects</span>
+            <span className="sidebar-projects-count">{projectGroups.length}</span>
+          </div>
+
+          <div className="sidebar-projects">
+            {loadingWorkspace ? (
+              <p className="sidebar-empty">Loading your projects…</p>
+            ) : projectGroups.length === 0 ? (
+              <p className="sidebar-empty">No tasks assigned to you yet.</p>
+            ) : (
+              projectGroups
+                .filter((g) => !isSearching || searchResultGroups.some((r) => r.id === g.id))
+                .map((group) => (
+                  <button
+                    key={group.id}
+                    className={`sidebar-project-row ${group.id === selectedProject?.id ? "selected" : ""}`}
+                    onClick={() => setSelectedProjectId(group.id)}
+                  >
+                    <span className="sidebar-project-dot" style={{ backgroundColor: colorForProject(group.id) }} />
+                    <span className="sidebar-project-name">{group.name}</span>
+                    <span className="sidebar-project-time">{formatClock(liveProjectSeconds(group))}</span>
+                    <svg className="sidebar-project-chevron" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 6l6 6-6 6" />
+                    </svg>
+                  </button>
+                ))
+            )}
+          </div>
+        </aside>
+
+        <main className="main-content">
+          {error && <p className="banner error">{error}</p>}
+          {notice && <p className="banner notice">{notice}</p>}
+
+          {isSearching ? (
+            <div className="project-card">
+              <div className="project-card-header">
+                <span className="project-card-icon" style={{ background: "#6b7280" }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round">
+                    <circle cx="11" cy="11" r="7" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  </svg>
+                </span>
+                <div className="project-card-heading">
+                  <h2>Search results</h2>
+                  <p>{searchResultGroups.reduce((n, g) => n + g.tasks.length, 0)} matching tasks</p>
+                </div>
+              </div>
+              <div className="task-table">
+                {searchResultGroups.length === 0 ? (
+                  <p className="sidebar-empty">Nothing matches your search.</p>
+                ) : (
+                  searchResultGroups.map((group) =>
+                    group.tasks.map((task) => (
+                      <TaskRow
+                        key={task.id}
+                        task={task}
+                        isRunning={task.id === running?.taskId}
+                        elapsedSeconds={elapsedSeconds}
+                        onClick={() => handleSwitchTask(task.id)}
+                        disabled={busy}
+                      />
+                    )),
+                  )
+                )}
+              </div>
+            </div>
+          ) : !selectedProject ? (
+            <div className="project-card">
+              <p className="sidebar-empty">
+                {loadingWorkspace ? "Loading your projects…" : "No tasks assigned to you yet — pick one up on the web app to start tracking."}
+              </p>
+            </div>
+          ) : (
+            <div className="project-card">
+              <div className="project-card-header">
+                <span className="project-card-icon" style={{ background: colorForProject(selectedProject.id) }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+                  </svg>
+                </span>
+                <div className="project-card-heading">
+                  <h2>{selectedProject.name}</h2>
+                  <p>
+                    {selectedProject.tasks.length} {selectedProject.tasks.length === 1 ? "task" : "tasks"}
+                    {" • "}
+                    {formatClock(liveProjectSeconds(selectedProject))} today
+                  </p>
+                </div>
+                <button
+                  className="project-card-menu"
+                  onClick={() => window.timeStaff.openExternal(`${WEB_DASHBOARD_URL}/projects/${selectedProject.id}`)}
+                  title="Open this project on the web dashboard"
+                  aria-label="Open this project on the web dashboard"
+                >
+                  <span className="project-card-menu-dot" />
+                  <span className="project-card-menu-dot" />
+                  <span className="project-card-menu-dot" />
+                </button>
+              </div>
+              <div className="task-table">
+                {selectedProject.tasks.length === 0 ? (
+                  <p className="sidebar-empty">This project has no tasks assigned to you.</p>
+                ) : (
+                  selectedProject.tasks.map((task) => (
+                    <TaskRow
+                      key={task.id}
+                      task={task}
+                      isRunning={task.id === running?.taskId}
+                      elapsedSeconds={elapsedSeconds}
+                      onClick={() => handleSwitchTask(task.id)}
+                      disabled={busy}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+        </main>
+      </div>
+
+      {/* Global bottom bar — full-width, same fixed height and floating-card
+          treatment as the status bar up top, so the four regions (status
+          bar, sidebar, task panel, bottom bar) read as a consistent grid
+          with equal gaps rather than the account block being just one more
+          thing bolted onto the bottom of the sidebar. */}
+      <div className="bottom-bar">
+        <div className="bottom-bar-user-wrap">
+          <button className="bottom-bar-user" onClick={() => setUserMenuOpen((v) => !v)}>
+            <span className="sidebar-avatar">
+              {`${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase()}
+            </span>
+            <span className="bottom-bar-user-info">
+              <span className="bottom-bar-user-name">{user.firstName} {user.lastName}</span>
+              <span className="bottom-bar-user-email">{user.email}</span>
+            </span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
+              <path d={userMenuOpen ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6"} />
             </svg>
           </button>
-        </div>
-
-        <input
-          className="task-search"
-          placeholder="Search projects or tasks…"
-          autoFocus
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-
-        <div className="task-list">
-          {loadingWorkspace ? (
-            <p className="task-list-empty">Loading your projects…</p>
-          ) : filteredGroups.length === 0 ? (
-            <p className="task-list-empty">
-              {projectGroups.length === 0 ? "No tasks assigned to you yet." : "Nothing matches your search."}
-            </p>
-          ) : (
-            filteredGroups.map((group) => (
-              <ProjectSection
-                key={group.id}
-                group={group}
-                expanded={isSearching || expandedProjectId === group.id}
-                runningTaskId={running?.taskId ?? null}
-                onToggle={() => handleToggleProject(group.id)}
-                onTaskClick={handleSwitchTask}
-                disabled={busy}
-              />
-            ))
+          {userMenuOpen && (
+            <div className="bottom-bar-user-menu">
+              <button
+                className="sidebar-user-menu-item"
+                onClick={() => window.timeStaff.openExternal(WEB_DASHBOARD_URL)}
+              >
+                Open web dashboard
+              </button>
+              <button className="sidebar-user-menu-item danger" onClick={handleLogout}>
+                Log out
+              </button>
+            </div>
           )}
         </div>
 
-        <div className="task-panel-footer">
-          <div className="footer-user">
-            <p className="footer-name">{user.firstName} {user.lastName}</p>
-            <p className="footer-email">{user.email}</p>
-          </div>
-          <button className="footer-logout" onClick={handleLogout} title="Log out">
-            ⎋
-          </button>
-        </div>
-      </aside>
+        <span className="status-bar-spacer" />
 
-      <main className="timer-panel">
         <button
-          className="dashboard-link"
-          onClick={() => window.timeStaff.openExternal(WEB_DASHBOARD_URL)}
-          title="Open web dashboard"
+          className="bottom-bar-refresh-btn"
+          onClick={handleRefresh}
+          disabled={refreshing || loadingWorkspace}
+          title="Refresh projects and tasks"
         >
-          Open dashboard ↗
+          <svg
+            className={refreshing || loadingWorkspace ? "spin" : ""}
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+            <path d="M21 4v6h-6" />
+          </svg>
+          Refresh
         </button>
+      </div>
+    </div>
+    </>
+  );
+}
 
-        <div className={`timer-display ${running && !idleAlert ? "live" : ""}`}>
-          {running && !idleAlert && <span className="pulse" />}
-          {formatClock(elapsedSeconds)}
-        </div>
-
-        <p className="timer-project" style={currentTask ? { color: colorForProject(currentTask.projectId) } : undefined}>
-          {currentTask?.projectName ?? "No task selected"}
-        </p>
-        <p className="timer-task">{currentTask?.title ?? "Pick a task from the left to start tracking"}</p>
-        {isOverdue(currentTask?.dueDate) && <p className="overdue-badge">Missed due date</p>}
-
-        <div className="timer-control-row">
-          {running ? (
-            <button className="control-btn running" onClick={handleStop} disabled={busy} title="Stop">
-              <span className="square" />
-            </button>
-          ) : (
-            <div className="control-btn idle" />
-          )}
-        </div>
-
-        {error && <p className="banner error">{error}</p>}
-        {notice && <p className="banner notice">{notice}</p>}
-
-        <p className="idle-threshold-note">Idle discard after {formatDurationLabel(idleThresholdSec)} of inactivity</p>
-      </main>
+// A custom-drawn replacement for the native OS title bar (see the
+// `titleBarStyle: 'hidden'` window option in main.ts) — the native one
+// can't be restyled at all, so to make it match the app's background,
+// height and font, the app has to draw its own draggable strip and let
+// Electron's titleBarOverlay redraw just the min/max/close buttons on top
+// of it in matching colors.
+function TitleBar() {
+  return (
+    <div className="title-bar">
+      <svg className="title-bar-mark" viewBox="0 0 32 32" fill="none" aria-hidden>
+        <rect width="32" height="32" rx="7" fill="#4F46E5" />
+        <rect x="13.5" y="3" width="5" height="3" rx="1.2" fill="#fff" />
+        <rect x="20.3" y="5" width="4" height="2.6" rx="1" fill="#fff" transform="rotate(45 22.3 6.3)" />
+        <circle cx="16" cy="18.5" r="10" fill="none" stroke="#fff" strokeWidth="2.3" />
+        <line x1="16" y1="18.5" x2="16" y2="12.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
+        <line x1="16" y1="18.5" x2="20" y2="18.5" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" />
+      </svg>
+      <span className="title-bar-name">TimeStaff</span>
     </div>
   );
 }
 
-function ProjectSection({
-  group,
-  expanded,
-  runningTaskId,
-  onToggle,
-  onTaskClick,
+// One row of the selected project's task table. Fixed height regardless of
+// whether the task has a due date, so switching projects never makes rows
+// jump to a different size depending on their content.
+function TaskRow({
+  task,
+  isRunning,
+  elapsedSeconds,
+  onClick,
   disabled,
 }: {
-  group: ProjectGroup;
-  expanded: boolean;
-  runningTaskId: string | null;
-  onToggle: () => void;
-  onTaskClick: (taskId: string) => void;
+  task: MyTask;
+  isRunning: boolean;
+  elapsedSeconds: number;
+  onClick: () => void;
   disabled: boolean;
 }) {
-  const isActiveProject = group.tasks.some((t) => t.id === runningTaskId);
+  const seconds = isRunning ? task.todaySeconds + elapsedSeconds : task.todaySeconds;
+  // The task's own description is the most useful second line when it has
+  // one; otherwise fall back to its due date so the row keeps a consistent
+  // two-line height either way.
+  const overdue = isOverdue(task.dueDate);
+  const subtitle =
+    task.description?.trim() ||
+    (overdue ? "Missed due date" : task.dueDate ? `Due ${formatDueDate(task.dueDate)}` : "No due date");
+  const subtitleIsOverdueWarning = !task.description?.trim() && overdue;
 
   return (
-    <div className="project-section">
+    <div className={`task-table-row ${isRunning ? "running" : ""}`}>
+      <span className={`task-radio ${isRunning ? "running" : ""}`} />
+      <span className="task-table-info">
+        <span className="task-table-title">{task.title}</span>
+        <span className={`task-table-subtitle ${subtitleIsOverdueWarning ? "overdue" : ""}`}>{subtitle}</span>
+      </span>
+      <span className="task-table-time">{formatClock(seconds)}</span>
+      <span className={`task-status-pill ${isRunning ? "running" : "idle"}`}>{isRunning ? "Running" : "Idle"}</span>
       <button
-        className={`project-row ${isActiveProject ? "active" : ""}`}
-        onClick={onToggle}
-        aria-expanded={expanded}
+        className={`task-toggle-btn ${isRunning ? "running" : ""}`}
+        onClick={onClick}
+        disabled={disabled}
+        title={isRunning ? "Stop" : "Start"}
+        aria-label={isRunning ? "Stop" : "Start"}
       >
-        <span className="project-row-dot" style={{ backgroundColor: colorForProject(group.id) }} />
-        <span className="project-row-name">{group.name}</span>
-        <span className="project-row-time">{formatCompact(group.todaySeconds)}</span>
-        <span className={`project-row-chevron ${expanded ? "open" : ""}`}>›</span>
+        {isRunning ? <span className="task-toggle-stop" /> : <span className="task-toggle-play" />}
       </button>
-
-      {expanded && (
-        <div className="project-tasks">
-          {group.tasks.map((task) => (
-            <button
-              key={task.id}
-              className={`task-row ${task.id === runningTaskId ? "active" : ""}`}
-              onClick={() => onTaskClick(task.id)}
-              disabled={disabled}
-            >
-              <span className="task-row-title">{task.title}</span>
-              {isOverdue(task.dueDate) && (
-                <span className="task-row-overdue" title="Missed due date">
-                  Missed due date
-                </span>
-              )}
-              <span className="task-row-time">{formatCompact(task.todaySeconds)}</span>
-              {task.id === runningTaskId && <span className="task-row-live">●</span>}
-            </button>
-          ))}
-        </div>
-      )}
+      <button
+        className="task-row-menu"
+        onClick={() => window.timeStaff.openExternal(`${WEB_DASHBOARD_URL}/tasks/${task.id}`)}
+        title="Open task on web dashboard"
+        aria-label="Open task on web dashboard"
+      >
+        <span className="task-row-menu-dot" />
+        <span className="task-row-menu-dot" />
+        <span className="task-row-menu-dot" />
+      </button>
     </div>
   );
 }

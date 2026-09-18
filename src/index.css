@@ -2,16 +2,37 @@
   box-sizing: border-box;
 }
 
+/* Every size in this file is in rem, so this single value is the app's
+   overall UI scale. 14px keeps the reference design's proportions (which
+   were drawn on a wider canvas) without everything rendering oversized in
+   the real window. */
+html {
+  font-size: 14px;
+  height: 100%;
+}
+
 body {
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
     sans-serif;
   margin: 0;
   padding: 0;
-  background: #f5f6fb;
-  color: #111827;
+  height: 100%;
+  background: #f2f6fb;
+  color: #0f172a;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+}
+
+/* The title bar and everything below it (boot/login/app-shell) stack as
+   siblings inside #root — this makes #root a column flexbox so the title
+   bar keeps its own fixed height and whatever follows fills the rest of
+   the window, instead of each sizing itself to a full 100vh and overflowing
+   by the title bar's height. */
+#root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 @keyframes fade-in {
@@ -37,13 +58,46 @@ body {
   }
 }
 
+/* --- Title bar -----------------------------------------------------------
+   Replaces the native OS title bar (see `titleBarStyle: 'hidden'` in
+   main.ts) so it can actually match the app's own background/height/font
+   instead of being stuck with the OS default dark bar. Height must match
+   the `titleBarOverlay.height` passed to BrowserWindow, or the native
+   minimize/maximize/close buttons (drawn by the OS on top of this) won't
+   line up with it vertically. */
+.title-bar {
+  height: 45px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0 0.9rem;
+  background: #f2f6fb;
+  -webkit-app-region: drag;
+}
+
+.title-bar-mark {
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 0.3rem;
+  flex-shrink: 0;
+}
+
+.title-bar-name {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #1e293b;
+  letter-spacing: -0.01em;
+}
+
 /* --- Boot screen ----------------------------------------------------- */
 
 .boot-screen {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
 }
 
 .spinner {
@@ -67,14 +121,15 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   background: linear-gradient(160deg, #eef0ff 0%, #f5f6fb 60%);
 }
 
 .login-card {
   width: 22rem;
   background: white;
-  border-radius: 1rem;
+  border-radius: 0.7rem;
   padding: 2.25rem 2rem;
   box-shadow: 0 20px 50px rgba(79, 70, 229, 0.12);
   text-align: center;
@@ -85,7 +140,7 @@ body {
   height: 3rem;
   margin: 0 auto 1rem;
   display: block;
-  border-radius: 0.85rem;
+  border-radius: 0.4rem;
   box-shadow: 0 6px 16px rgba(79, 70, 229, 0.3);
 }
 
@@ -118,7 +173,7 @@ body {
 
 .login-card input {
   padding: 0.6rem 0.75rem;
-  border-radius: 0.6rem;
+  border-radius: 0.4rem;
   border: 1px solid #e5e7eb;
   font-size: 0.9rem;
   background: #f9fafb;
@@ -140,7 +195,7 @@ body {
 .login-submit {
   margin-top: 0.25rem;
   padding: 0.65rem;
-  border-radius: 0.6rem;
+  border-radius: 0.4rem;
   border: none;
   background: linear-gradient(135deg, #4f46e5, #4338ca);
   color: white;
@@ -164,72 +219,294 @@ body {
   cursor: default;
 }
 
-/* --- App shell: two-pane layout ----------------------------------------- */
+/* --- App shell -----------------------------------------------------------
+   .app-shell is a fixed column: the status bar, then everything else. The
+   status bar is ALWAYS rendered (idle or running is just a class swap on
+   the same element) — nothing here mounts or unmounts based on timer
+   state, which is what made the previous layout visibly "jump" every time
+   a timer started or stopped. Every row height below is fixed too, so
+   selecting a project or starting a task never resizes a button out from
+   under the pointer. */
+
+:root {
+  /* The one gap used everywhere a panel meets another panel or the window
+     edge — status bar, sidebar, task panel and bottom bar all read as
+     separate floating cards on the tinted background because they all
+     share this exact spacing, never a bespoke margin per element. */
+  --panel-gap: 0.8rem;
+}
 
 .app-shell {
   display: flex;
-  height: 100vh;
-}
-
-/* --- Left: task panel ---------------------------------------------------- */
-
-.task-panel {
-  width: 20rem;
-  flex-shrink: 0;
-  display: flex;
   flex-direction: column;
-  background: white;
-  border-right: 1px solid #eef0f3;
-  padding: 1.1rem 1rem;
+  gap: var(--panel-gap);
+  flex: 1;
+  min-height: 0;
+  /* Only bottom padding here — the status bar sits flush against the title
+     bar above it and the window's left/right edges. Everything below it
+     (app-body, bottom-bar) applies its own left/right margin instead, so
+     only the status bar goes edge-to-edge. */
+  padding: 0 0 var(--panel-gap);
+  background: #f2f6fb;
 }
 
-.task-panel-header {
+@keyframes rec-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(220, 38, 38, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+  }
+}
+
+/* --- Status bar: the one and only timer, always in the same place -------- */
+
+/* Three columns — empty / centered timer group / Stop pinned right — so the
+   timer group sits at the true horizontal centre of the bar instead of
+   being centred in whatever space the Stop button leaves over. */
+.status-bar {
+  flex-shrink: 0;
+  height: 4.95rem;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 0 1.25rem;
+  background: #fcfdfd;
+  border-bottom: 1px solid #e5e7eb;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.status-bar-center {
+  grid-column: 2;
   display: flex;
   align-items: center;
-  gap: 0.55rem;
-  margin-bottom: 1rem;
+  gap: 1.25rem;
+  min-width: 0;
 }
 
-.brand-mark {
-  width: 1.9rem;
-  height: 1.9rem;
-  border-radius: 0.5rem;
+.status-divider {
+  width: 1px;
+  height: 2.5rem;
+  background: #e5e7eb;
   flex-shrink: 0;
 }
 
-.brand-name {
-  font-weight: 700;
-  font-size: 1rem;
-  flex: 1;
+/* Between Project and Task specifically — the pill/clock/Project grouping
+   reads fine as-is, this is the one gap that needed more breathing room. */
+.status-divider-wide {
+  margin: 0 0.5rem;
 }
 
-.refresh-btn {
-  width: 1.9rem;
-  height: 1.9rem;
-  border-radius: 0.5rem;
-  border: 1px solid #e5e7eb;
-  background: white;
-  color: #6b7280;
-  cursor: pointer;
-  flex-shrink: 0;
+.status-pill {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s ease, color 0.15s ease;
+  gap: 0.45rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.5rem 0.95rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+  /* "Running" and "Idle" are different lengths — without a fixed width the
+     pill (and everything centered alongside it) visibly shifts sideways
+     every time the timer starts or stops. */
+  width: 6.75rem;
 }
 
-.refresh-btn:hover:not(:disabled) {
-  background: #eef2ff;
-  color: #4f46e5;
+.status-pill.running {
+  background: #dcfce7;
+  color: #15803d;
 }
 
-.refresh-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
+.status-pill.idle {
+  background: #f1f5f9;
+  color: #64748b;
 }
 
-.refresh-btn .spin {
-  animation: refresh-spin 0.8s linear infinite;
+.status-pill-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.status-pill.running .status-pill-dot {
+  animation: rec-pulse 1.8s infinite;
+}
+
+/* The reference UI sets times in the same sans as everything else, just
+   with tabular figures so the digits don't jitter as they tick — a
+   monospace face here reads as a different, heavier typeface mid-sentence
+   (and renders slashed zeros on Windows). */
+.status-clock {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #0f172a;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  flex-shrink: 0;
+  /* Always exactly "HH:MM:SS" so tabular-nums alone already keeps this a
+     constant width — pinned explicitly anyway so nothing here can ever
+     shift the centered group sideways. */
+  width: 6.5rem;
+}
+
+.status-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  /* Fixed, not max — a short project/task name must not shrink this box,
+     or selecting a different task shifts the whole centered group
+     sideways every time. Long names still truncate via the ellipsis on
+     .status-field-value below. */
+  width: 12rem;
+}
+
+.status-field-label {
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: #94a3b8;
+}
+
+.status-field-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-bar-spacer {
+  flex: 1;
+}
+
+.status-stop-btn {
+  grid-column: 3;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 0.45rem;
+  padding: 0.8rem 1.4rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: white;
+  background: #ef4444;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.status-stop-btn:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.status-stop-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Muted neutral rather than a washed-out pink — a faded red still reads as
+   "this is the red button, broken" where grey reads as plainly unavailable. */
+.status-stop-btn:disabled {
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: default;
+}
+
+.status-stop-btn:disabled .status-stop-icon {
+  background: #94a3b8;
+}
+
+.status-stop-icon {
+  width: 0.7rem;
+  height: 0.7rem;
+  background: white;
+  border-radius: 0.15rem;
+}
+
+/* --- Body: sidebar + main content ----------------------------------------- */
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: var(--panel-gap);
+  margin: 0 var(--panel-gap);
+}
+
+/* --- Sidebar: projects only ------------------------------------------------
+   Its own standalone floating card — rounded on every corner, its own
+   border and shadow — rather than sharing an edge with the status bar or
+   bottom bar above/below it. Nothing inside it nests or expands either:
+   every row is the same fixed height whether idle or not, so clicking a
+   project never changes anything's size, only which row is highlighted. */
+
+.sidebar {
+  width: 22rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fcfdfd;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.4rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  padding: 0.8rem;
+  overflow: hidden;
+}
+
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.665rem 0.9rem;
+  border-radius: 0.45rem;
+  border: 1px solid #e5e7eb;
+  background: #f8f9fc;
+  color: #9ca3af;
+  margin-bottom: 1.25rem;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.sidebar-search:focus-within {
+  border-color: #4f46e5;
+  background: white;
+}
+
+.sidebar-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  font-size: 0.92rem;
+  color: #111827;
+}
+
+.sidebar-projects-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.6rem;
+  padding: 0 0.35rem;
+}
+
+.sidebar-projects-label {
+  flex: 1;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.sidebar-projects-count {
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
 }
 
 @keyframes refresh-spin {
@@ -241,31 +518,14 @@ body {
   }
 }
 
-.task-search {
-  width: 100%;
-  padding: 0.55rem 0.75rem;
-  border-radius: 0.6rem;
-  border: 1px solid #e5e7eb;
-  background: #f9fafb;
-  font-size: 0.85rem;
-  margin-bottom: 0.65rem;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.task-search:focus {
-  outline: none;
-  border-color: #4f46e5;
-  background: white;
-}
-
-.task-list {
+.sidebar-projects {
   flex: 1;
   overflow-y: auto;
   margin: 0 -0.4rem;
   padding: 0 0.4rem;
 }
 
-.task-list-empty {
+.sidebar-empty {
   text-align: center;
   color: #9ca3af;
   font-size: 0.82rem;
@@ -273,48 +533,130 @@ body {
   line-height: 1.5;
 }
 
-/* Project-first browsing: pick a project, its tasks (assigned to you)
-   appear beneath it, click one to start/switch the timer. Only one
-   project's tasks show at a time (accordion) — search flattens this so
-   every match is visible without hunting for the right project first. */
-.project-section {
-  margin-bottom: 0.15rem;
-}
-
-.project-row {
+.sidebar-project-row {
   width: 100%;
+  height: 2.835rem;
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.8rem;
   border: none;
+  border-left: 3px solid transparent;
   background: none;
-  padding: 0.6rem 0.5rem;
-  border-radius: 0.55rem;
+  padding: 0 0.9rem;
+  border-radius: 0.4rem;
   cursor: pointer;
   text-align: left;
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+
+.sidebar-project-row:hover {
+  background: #f8fafc;
+}
+
+.sidebar-project-row.selected {
+  background: #eef2ff;
+  border-left-color: #4f46e5;
+}
+
+.sidebar-project-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.sidebar-project-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-project-row.selected .sidebar-project-name {
+  font-weight: 600;
+}
+
+.sidebar-project-time {
+  font-size: 0.88rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.sidebar-project-chevron {
+  flex-shrink: 0;
+  color: #cbd5e1;
+}
+
+/* --- Bottom bar: account + refresh, the fourth floating panel -------------
+   Full width, same fixed height and card treatment as the status bar up
+   top, so it doesn't read as an appendage hanging off the sidebar. */
+
+.bottom-bar {
+  flex-shrink: 0;
+  height: 4rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 1rem;
+  margin: 0 var(--panel-gap);
+  background: #fcfdfd;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.4rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.bottom-bar-user-wrap {
+  position: relative;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.bottom-bar-user {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  border: none;
+  background: none;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  text-align: left;
+  color: #6b7280;
   transition: background 0.1s ease;
 }
 
-.project-row:hover {
-  background: #f3f4f6;
+.bottom-bar-user:hover {
+  background: #f9fafb;
 }
 
-.project-row.active {
-  background: #eef2ff;
-}
-
-.project-row-dot {
-  width: 0.6rem;
-  height: 0.6rem;
+.sidebar-avatar {
+  width: 2.15rem;
+  height: 2.15rem;
   border-radius: 999px;
+  background: linear-gradient(135deg, #6366f1, #4338ca);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.04);
 }
 
-.project-row-name {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.87rem;
+.bottom-bar-user-info {
+  display: flex;
+  flex-direction: column;
+  max-width: 12rem;
+}
+
+.bottom-bar-user-name {
+  font-size: 0.82rem;
   font-weight: 600;
   color: #111827;
   overflow: hidden;
@@ -322,280 +664,374 @@ body {
   white-space: nowrap;
 }
 
-.project-row.active .project-row-name {
-  color: #4338ca;
-}
-
-.project-row-time {
-  font-size: 0.78rem;
+.bottom-bar-user-email {
+  font-size: 0.7rem;
   color: #9ca3af;
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.project-row-chevron {
-  flex-shrink: 0;
-  color: #9ca3af;
-  transition: transform 0.15s ease;
-  font-size: 1rem;
+.bottom-bar-user-menu {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 0;
+  min-width: 12rem;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.4rem;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+  overflow: hidden;
+  animation: fade-in 0.12s ease;
 }
 
-.project-row-chevron.open {
-  transform: rotate(90deg);
-}
-
-.project-tasks {
-  padding-left: 1.35rem;
-  border-left: 2px solid #f3f4f6;
-  margin: 0.1rem 0 0.4rem 0.75rem;
-}
-
-.task-row {
+.sidebar-user-menu-item {
   width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
+  display: block;
   border: none;
-  background: none;
-  padding: 0.5rem 0.5rem;
-  border-radius: 0.5rem;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.1s ease;
-}
-
-.task-row:hover {
-  background: #f3f4f6;
-}
-
-.task-row.active {
-  background: #eef2ff;
-}
-
-.task-row:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-.task-row-title {
-  flex: 1;
-  min-width: 0;
+  background: white;
+  padding: 0.65rem 0.85rem;
   font-size: 0.82rem;
   font-weight: 500;
   color: #374151;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: left;
+  cursor: pointer;
 }
 
-.task-row.active .task-row-title {
-  color: #4338ca;
-  font-weight: 600;
+.sidebar-user-menu-item:hover {
+  background: #f9fafb;
 }
 
-.task-row-time {
-  font-size: 0.75rem;
-  color: #9ca3af;
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-
-.task-row-live {
-  color: #16a34a;
-  font-size: 0.6rem;
-  flex-shrink: 0;
-}
-
-.task-row-overdue {
-  flex-shrink: 0;
-  font-size: 0.66rem;
-  font-weight: 600;
+.sidebar-user-menu-item.danger {
   color: #dc2626;
-  background: #fef2f2;
-  border-radius: 0.35rem;
-  padding: 0.1rem 0.4rem;
+  border-top: 1px solid #f3f4f6;
 }
 
-.overdue-badge {
-  margin-top: -0.35rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: #dc2626;
-}
-
-.task-panel-footer {
+.bottom-bar-refresh-btn {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  border-top: 1px solid #eef0f3;
-  padding-top: 0.75rem;
-  margin-top: 0.5rem;
+  gap: 0.45rem;
+  border: 1px solid #e5e7eb;
+  background: white;
+  color: #374151;
+  border-radius: 0.4rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
-.footer-user {
+.bottom-bar-refresh-btn:hover:not(:disabled) {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.bottom-bar-refresh-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.bottom-bar-refresh-btn .spin {
+  animation: refresh-spin 0.8s linear infinite;
+}
+
+/* --- Main content: selected project's task table --------------------------- */
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0.96rem;
+  background: #fcfdfd;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.4rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.project-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.project-card-header {
+  display: flex;
+  align-items: center;
+  gap: 1.1rem;
+  padding: 0.5rem 0.25rem 1.4rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.project-card-icon {
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 0.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.project-card-heading {
   flex: 1;
   min-width: 0;
 }
 
-.footer-name {
-  font-size: 0.82rem;
-  font-weight: 600;
+.project-card-heading h2 {
   margin: 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.footer-email {
-  font-size: 0.7rem;
-  color: #9ca3af;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.project-card-heading p {
+  margin: 0.25rem 0 0;
+  font-size: 0.88rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
 }
 
-.footer-logout {
-  width: 2rem;
-  height: 2rem;
-  border-radius: 0.5rem;
-  border: 1px solid #e5e7eb;
-  background: white;
-  color: #6b7280;
-  cursor: pointer;
+.project-card-menu {
   flex-shrink: 0;
-  transition: background 0.15s ease, color 0.15s ease;
+  width: 2.3rem;
+  height: 2.3rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  border: none;
+  background: none;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
 }
 
-.footer-logout:hover {
-  background: #fef2f2;
-  color: #b91c1c;
+.project-card-menu:hover {
+  background: #f3f4f6;
 }
 
-/* --- Right: timer panel --------------------------------------------------- */
+.project-card-menu-dot {
+  width: 0.28rem;
+  height: 0.28rem;
+  border-radius: 999px;
+  background: #94a3b8;
+}
 
-.timer-panel {
+.task-table {
   flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 0.35rem 0;
+}
+
+.task-table-row {
+  height: 5.2rem;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 0.9rem;
+  border-radius: 0.35rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.task-table-row:last-child {
+  border-bottom: none;
+}
+
+/* The running row reads as a single highlighted block, so its own
+   separator would cut through the highlight — drop it and let the fill
+   do the separating. */
+.task-table-row.running {
+  background: #eef2ff;
+  border-bottom-color: transparent;
+}
+
+.task-radio {
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 999px;
+  border: 2px solid #cbd5e1;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.task-radio.running {
+  border-color: #4f46e5;
+}
+
+.task-radio.running::after {
+  content: "";
+  position: absolute;
+  inset: 0.2rem;
+  border-radius: 999px;
+  background: #4f46e5;
+}
+
+.task-table-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.task-table-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-table-row.running .task-table-title {
+  color: #312e81;
+}
+
+.task-table-subtitle {
+  font-size: 0.88rem;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-table-subtitle.overdue {
+  color: #dc2626;
+  font-weight: 500;
+}
+
+.task-table-time {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  min-width: 5.5rem;
+  text-align: right;
+}
+
+.task-table-row.running .task-table-time {
+  color: #312e81;
+  font-weight: 600;
+}
+
+.task-status-pill {
+  flex-shrink: 0;
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  min-width: 5rem;
+  text-align: center;
+}
+
+.task-status-pill.running {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.task-status-pill.idle {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.task-toggle-btn {
+  flex-shrink: 0;
+  width: 2.15rem;
+  height: 2.15rem;
+  border-radius: 999px;
+  border: none;
+  background: #eef2ff;
+  color: #4f46e5;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.task-toggle-btn:hover:not(:disabled) {
+  background: #e0e7ff;
+}
+
+.task-toggle-btn:active:not(:disabled) {
+  transform: scale(0.93);
+}
+
+.task-toggle-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.task-toggle-btn.running {
+  background: #4f46e5;
+}
+
+.task-toggle-btn.running:hover:not(:disabled) {
+  background: #4338ca;
+}
+
+.task-toggle-play {
+  width: 0;
+  height: 0;
+  margin-left: 0.2rem;
+  border-top: 0.45rem solid transparent;
+  border-bottom: 0.45rem solid transparent;
+  border-left: 0.65rem solid #4f46e5;
+}
+
+.task-toggle-stop {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 0.15rem;
+  background: white;
+}
+
+/* Vertical kebab at the end of each row — opens that task on the web app,
+   which is where anything beyond start/stop actually happens. */
+.task-row-menu {
+  flex-shrink: 0;
+  width: 1.9rem;
+  height: 2.3rem;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  position: relative;
-  padding: 2rem;
-}
-
-.dashboard-link {
-  position: absolute;
-  top: 1.25rem;
-  right: 1.5rem;
-  border: 1px solid #e5e7eb;
-  background: white;
-  color: #6b7280;
-  border-radius: 0.55rem;
-  padding: 0.4rem 0.75rem;
-  font-size: 0.78rem;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.dashboard-link:hover {
-  background: #f3f4f6;
-  color: #4f46e5;
-}
-
-.timer-display {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.65rem;
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 3.4rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: #111827;
-  transition: color 0.2s ease;
-}
-
-.timer-display.live {
-  color: #4338ca;
-}
-
-.pulse {
-  width: 0.6rem;
-  height: 0.6rem;
-  border-radius: 999px;
-  background: #86efac;
-  box-shadow: 0 0 0 rgba(134, 239, 172, 0.6);
-  animation: pulse 1.8s infinite;
-  flex-shrink: 0;
-}
-
-.timer-project {
-  margin: 1rem 0 0.15rem;
-  font-weight: 700;
-  font-size: 1rem;
-}
-
-.timer-task {
-  margin: 0 0 1.75rem;
-  color: #6b7280;
-  font-size: 0.9rem;
-  text-align: center;
-  max-width: 26rem;
-}
-
-.timer-control-row {
-  margin-bottom: 1.5rem;
-}
-
-.control-btn {
-  width: 4.5rem;
-  height: 4.5rem;
-  border-radius: 999px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  gap: 0.2rem;
   border: none;
+  background: none;
+  border-radius: 0.35rem;
   cursor: pointer;
-  transition: transform 0.1s ease, box-shadow 0.15s ease;
+  transition: background 0.15s ease;
 }
 
-.control-btn.running {
-  background: linear-gradient(135deg, #4f46e5, #4338ca);
-  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
+.task-row-menu:hover {
+  background: rgba(15, 23, 42, 0.06);
 }
 
-.control-btn.running:hover {
-  box-shadow: 0 8px 22px rgba(79, 70, 229, 0.45);
-}
-
-.control-btn.running:active {
-  transform: scale(0.95);
-}
-
-.control-btn.running .square {
-  width: 1.1rem;
-  height: 1.1rem;
-  background: white;
-  border-radius: 0.25rem;
-}
-
-.control-btn.idle {
-  background: #f9fafb;
-  border: 2px dashed #d1d5db;
-  cursor: default;
-}
-
-.idle-threshold-note {
-  color: #9ca3af;
-  font-size: 0.75rem;
-  margin-top: 0.5rem;
+.task-row-menu-dot {
+  width: 0.26rem;
+  height: 0.26rem;
+  border-radius: 999px;
+  background: #94a3b8;
 }
 
 /* --- Banners ---------------------------------------------------------- */
 
 .banner {
-  border-radius: 0.5rem;
+  border-radius: 0.35rem;
   padding: 0.55rem 0.9rem;
   font-size: 0.8rem;
   margin-bottom: 0.6rem;
@@ -656,7 +1092,7 @@ body {
 
 .idle-dialog {
   background: white;
-  border-radius: 0.9rem;
+  border-radius: 0.4rem;
   padding: 1.5rem;
   width: 20rem;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
@@ -672,7 +1108,7 @@ body {
 .idle-card {
   border: 1px solid #eef0f3;
   background: #fafafa;
-  border-radius: 0.65rem;
+  border-radius: 0.45rem;
   padding: 0.9rem;
 }
 
@@ -745,7 +1181,7 @@ body {
 
 .idle-btn {
   padding: 0.5rem 0.95rem;
-  border-radius: 0.55rem;
+  border-radius: 0.4rem;
   font-size: 0.85rem;
   font-weight: 500;
   cursor: pointer;

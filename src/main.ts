@@ -141,7 +141,22 @@ const createWindow = () => {
     minHeight: 520,
     title: 'TimeStaff',
     icon: WINDOW_ICON,
-    backgroundColor: '#f5f6fb',
+    backgroundColor: '#f2f6fb',
+    // The default native title bar is dark and unstylable from CSS —
+    // 'hidden' removes it and lets the renderer draw its own title strip
+    // (see the ".title-bar" element in App.tsx) at the app's own background
+    // color, with just the minimize/maximize/close buttons redrawn by the
+    // OS in titleBarOverlay's colors. macOS ignores titleBarOverlay's color
+    // fields (it always draws its own traffic-light buttons) but honors
+    // 'hidden' itself, which is enough to remove the dark bar there too.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#f2f6fb',
+      symbolColor: '#334155',
+      // Must match .title-bar's height in index.css or the native
+      // minimize/maximize/close buttons won't line up with it vertically.
+      height: 45,
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
     },
