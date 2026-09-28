@@ -1309,9 +1309,9 @@ body.mini-timer-window {
 /* The blinking dot alone was too easy to miss — this pulses a glow out
    from the whole bar (into the transparent margin around it, see
    .mini-timer-stage) so the warning reads at a glance instead of needing
-   to be staring right at a small dot. Amber for the first 7 of the last
-   10 seconds before idle, switching to a faster, further-reaching red
-   glow for the final 3 — genuinely more urgent, not just a color swap. */
+   to be staring right at a small dot. Amber for the first 10 of the last
+   15 seconds before idle, switching to a faster, further-reaching red
+   glow for the final 5 — genuinely more urgent, not just a color swap. */
 .mini-timer.warning {
   animation: mini-timer-glow-amber 0.5s ease-in-out infinite alternate;
 }
@@ -1434,7 +1434,7 @@ body.mini-timer-window {
   animation: mini-timer-warning-blink 0.5s step-start infinite;
 }
 
-/* The final 3 seconds before idle — red, and blinking noticeably faster
+/* The final 5 seconds before idle — red, and blinking noticeably faster
    than the amber warning, so it reads as more urgent rather than just a
    different color at the same pace. */
 .mini-timer-dot.critical {
@@ -1512,4 +1512,387 @@ body.mini-timer-window {
 
 .mini-timer-close-icon::after {
   transform: rotate(-45deg);
+}
+
+/* --- Screenshot toast ("screenshot captured" popup) ----------------------
+   Modeled on a Windows 11 toast (it replaces the native one): app logo,
+   bold title, message, dismiss button, in the system's light or dark
+   theme. Shared by the real popup window and the scaled-down previews in
+   Settings, so a preview is exactly what appears. Sizes are in px, not rem,
+   to match the real toast's dimensions rather than this app's font scale. */
+
+.toast-card {
+  position: relative;
+  width: 364px;
+  height: 76px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 40px 0 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: #2c2c2c;
+  color: #ffffff;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+}
+
+.toast-card-logo {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 6px;
+}
+
+.toast-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.toast-card-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.toast-card-body {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.79);
+}
+
+.toast-card-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.toast-card-dismiss:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+/* The preview copies in Settings draw the X but aren't clickable. */
+.toast-card-dismiss.static {
+  pointer-events: none;
+}
+
+@media (prefers-color-scheme: light) {
+  .toast-card {
+    background: #f9f9f9;
+    border-color: rgba(0, 0, 0, 0.08);
+    color: #1a1a1a;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  }
+
+  .toast-card-body {
+    color: rgba(0, 0, 0, 0.62);
+  }
+
+  .toast-card-dismiss {
+    color: rgba(0, 0, 0, 0.55);
+  }
+
+  .toast-card-dismiss:hover {
+    background: rgba(0, 0, 0, 0.07);
+    color: #1a1a1a;
+  }
+}
+
+/* Real popup window: transparent so the card's corners are truly rounded
+   against the desktop, with room around it for the shadow (and the gap
+   from the screen edge — see TOAST_WIDTH/HEIGHT in main.ts). */
+body.toast-window {
+  background: transparent;
+}
+
+.toast-stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: toast-in 0.22s ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Settings page ---------------------------------------------------------- */
+
+.settings-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--panel-gap);
+  padding: 0 var(--panel-gap) var(--panel-gap);
+  background: #f2f6fb;
+}
+
+.settings-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  background: #fcfdfd;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.4rem;
+}
+
+.settings-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid #e5e7eb;
+  background: white;
+  color: #374151;
+  border-radius: 0.4rem;
+  padding: 0.45rem 0.85rem 0.45rem 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.settings-back-btn:hover {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settings-card {
+  background: #fcfdfd;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.4rem;
+  padding: 1.25rem;
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.1rem;
+}
+
+.settings-card-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.settings-card-head p {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.settings-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+
+.settings-saved {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #15803d;
+}
+
+.settings-test-btn {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+  border-radius: 0.4rem;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.settings-test-btn:hover {
+  background: #e0e7ff;
+}
+
+.position-grid {
+  display: grid;
+  /* Three columns so the nine previews form a 3x3 map of the screen — the
+     layout itself shows where each position is. */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.position-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.7rem;
+  background: white;
+  border: 2px solid #e5e7eb;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.position-option:hover {
+  border-color: #c7d2fe;
+}
+
+.position-option.selected {
+  border-color: #4f46e5;
+  background: #f5f6ff;
+}
+
+/* A miniature "screen" — the preview toast is anchored to whichever corner
+   (or the center) that option puts the real popup in. */
+.mock-screen {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  background: linear-gradient(160deg, #cbd5e1, #e2e8f0);
+  border: 1px solid #cbd5e1;
+  border-radius: 0.3rem;
+}
+
+.mock-toast {
+  position: absolute;
+  display: block;
+  transform: scale(0.3);
+}
+
+.mock-toast.pos-bottom-right {
+  right: 0.35rem;
+  bottom: 0.35rem;
+  transform-origin: bottom right;
+}
+
+.mock-toast.pos-bottom-left {
+  left: 0.35rem;
+  bottom: 0.35rem;
+  transform-origin: bottom left;
+}
+
+.mock-toast.pos-top-left {
+  left: 0.35rem;
+  top: 0.35rem;
+  transform-origin: top left;
+}
+
+.mock-toast.pos-top-right {
+  right: 0.35rem;
+  top: 0.35rem;
+  transform-origin: top right;
+}
+
+.mock-toast.pos-top-center {
+  left: 50%;
+  top: 0.35rem;
+  transform: translateX(-50%) scale(0.3);
+  transform-origin: top center;
+}
+
+.mock-toast.pos-bottom-center {
+  left: 50%;
+  bottom: 0.35rem;
+  transform: translateX(-50%) scale(0.3);
+  transform-origin: bottom center;
+}
+
+.mock-toast.pos-left-center {
+  left: 0.35rem;
+  top: 50%;
+  transform: translateY(-50%) scale(0.3);
+  transform-origin: center left;
+}
+
+.mock-toast.pos-right-center {
+  right: 0.35rem;
+  top: 50%;
+  transform: translateY(-50%) scale(0.3);
+  transform-origin: center right;
+}
+
+.mock-toast.pos-center {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) scale(0.3);
+  transform-origin: center;
+}
+
+.position-option-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.position-radio {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 2px solid #cbd5e1;
+  position: relative;
+}
+
+.position-option.selected .position-radio {
+  border-color: #4f46e5;
+}
+
+.position-option.selected .position-radio::after {
+  content: "";
+  position: absolute;
+  inset: 0.15rem;
+  border-radius: 999px;
+  background: #4f46e5;
+}
+
+.position-default {
+  margin-left: auto;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #64748b;
+  background: #f1f5f9;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
 }

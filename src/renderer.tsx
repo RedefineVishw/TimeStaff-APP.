@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { IdleAlertWindowApp } from "./IdleAlertWindowApp";
 import { MiniTimerWindowApp } from "./MiniTimerWindowApp";
+import { ScreenshotToastWindowApp } from "./ScreenshotToastWindowApp";
 import "./index.css";
 
 const root = document.getElementById("root");
@@ -18,6 +19,8 @@ function renderForHash() {
       return <IdleAlertWindowApp />;
     case "#mini-timer":
       return <MiniTimerWindowApp />;
+    case "#screenshot-toast":
+      return <ScreenshotToastWindowApp />;
     default:
       return <App />;
   }

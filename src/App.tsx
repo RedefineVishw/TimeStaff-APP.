@@ -18,6 +18,8 @@ import {
   type Task,
 } from "./lib/api";
 import { Login } from "./Login";
+import { SettingsPage } from "./SettingsPage";
+import { getScreenshotAlertPosition } from "./lib/settings";
 
 const WEB_DASHBOARD_URL = "http://localhost:3000";
 
@@ -64,9 +66,9 @@ function formatClock(totalSeconds: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
-// The org admin can configure the idle threshold as low as 15s (see the
-// tracking-settings range), so "round to whole minutes" silently displayed
-// "0 min" for any sub-minute value — show seconds below a minute instead.
+// The org admin can configure the idle threshold as low as 30s (see the
+// tracking-settings range), so "round to whole minutes" would show
+// "1 min" for a 30s threshold and misstate it for any sub-minute value — show seconds below a minute instead.
 function formatDurationLabel(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`;
   const minutes = Math.round(totalSeconds / 60);
@@ -151,6 +153,10 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // Which top-level page is showing. Just a view swap — the timer, idle
+  // detection and floating widget all live in this component and keep
+  // running while Settings is open.
+  const [view, setView] = useState<"home" | "settings">("home");
   const [idleAlert, setIdleAlert] = useState<IdleAlertState | null>(null);
   // Set when the floating mini-timer widget's own pause button is used —
   // distinct from a full Stop: the session's time is already folded into
@@ -393,17 +399,17 @@ export function App() {
       const tickElapsed = sessionElapsedBaseSec + Math.floor((Date.now() - startedAt) / 1000);
       setElapsedSeconds(tickElapsed);
 
-      // Warn on the mini-timer widget for the last 10 seconds before idle
-      // actually triggers — amber for the first 7 of those, switching to a
-      // more urgent red for the final 3 — instead of the steady green, so
+      // Warn on the mini-timer widget for the last 15 seconds before idle
+      // actually triggers — amber for the first 10 of those, switching to a
+      // more urgent red for the final 5 — instead of the steady green, so
       // it's a heads-up rather than indistinguishable from normal ticking.
       // Naturally clears the moment real activity resets idleSeconds, no
       // separate timeout to manage.
       const secondsUntilIdle = idleThresholdSec - idleSeconds;
       const miniTimerStatus =
-        secondsUntilIdle > 0 && secondsUntilIdle <= 3
+        secondsUntilIdle > 0 && secondsUntilIdle <= 5
           ? "idle-critical"
-          : secondsUntilIdle > 3 && secondsUntilIdle <= 10
+          : secondsUntilIdle > 5 && secondsUntilIdle <= 15
             ? "idle-warning"
             : "running";
       const taskInfo = findTaskInfo(projectGroups, running.taskId);
@@ -444,9 +450,9 @@ export function App() {
         const bytes = await window.timeStaff.captureScreenshot();
         const blob = new Blob([bytes], { type: "image/png" });
         await uploadScreenshot(taskId, blob);
-        // Raised from the main process (not the web Notification API) so
-        // the OS toast shows TimeStaff's own icon instead of Electron's.
-        window.timeStaff.notifyScreenshotCaptured();
+        // Read fresh each time (not captured when the timer started) so a
+        // position picked in Settings applies to the very next screenshot.
+        window.timeStaff.notifyScreenshotCaptured(getScreenshotAlertPosition());
       } catch (err) {
         if (isEntitlementError(err)) {
           // Org's plan doesn't include screenshots — stop trying instead of
@@ -792,6 +798,15 @@ export function App() {
     );
   }
 
+  if (view === "settings") {
+    return (
+      <>
+        <TitleBar />
+        <SettingsPage onBack={() => setView("home")} />
+      </>
+    );
+  }
+
   const runningRowSeconds = running ? currentTask ? currentTask.todaySeconds + elapsedSeconds : elapsedSeconds : 0;
 
   return (
@@ -998,6 +1013,15 @@ export function App() {
                 onClick={() => window.timeStaff.openExternal(WEB_DASHBOARD_URL)}
               >
                 Open web dashboard
+              </button>
+              <button
+                className="sidebar-user-menu-item"
+                onClick={() => {
+                  setUserMenuOpen(false);
+                  setView("settings");
+                }}
+              >
+                Settings
               </button>
               <button className="sidebar-user-menu-item danger" onClick={handleLogout}>
                 Log out

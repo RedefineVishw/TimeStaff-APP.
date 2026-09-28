@@ -21,6 +21,17 @@ interface MiniTimerData {
   status: 'running' | 'paused' | 'idle-warning' | 'idle-critical';
 }
 
+type ScreenshotAlertPosition =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'left-center'
+  | 'center'
+  | 'right-center'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right';
+
 type MiniTimerAction = 'pause' | 'resume' | 'dismiss';
 
 // Deliberately tiny surface: only what the renderer actually needs from the
@@ -36,9 +47,15 @@ contextBridge.exposeInMainWorld('timeStaff', {
   getIdleSeconds: (): Promise<number> => ipcRenderer.invoke('get-idle-seconds'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open-external', url),
   captureScreenshot: (): Promise<Uint8Array> => ipcRenderer.invoke('capture-screenshot'),
-  // Raised from the main process (see main.ts) so the toast gets a real
-  // TimeStaff icon instead of falling back to Electron's default.
-  notifyScreenshotCaptured: (): Promise<void> => ipcRenderer.invoke('notify-screenshot-captured'),
+  // Shows the small "screenshot captured" popup window at the given screen
+  // position (see the screenshot toast section of main.ts).
+  notifyScreenshotCaptured: (position: ScreenshotAlertPosition): Promise<void> =>
+    ipcRenderer.invoke('notify-screenshot-captured', position),
+  // The screenshot popup's own dismiss (X) button — closes it immediately
+  // instead of waiting out the few seconds it stays up.
+  screenshotToast: {
+    dismiss: () => ipcRenderer.send('screenshot-toast:dismiss'),
+  },
   auth: {
     getRefreshToken: (): Promise<string | null> => ipcRenderer.invoke('auth:get-refresh-token'),
     setRefreshToken: (token: string): Promise<boolean> => ipcRenderer.invoke('auth:set-refresh-token', token),

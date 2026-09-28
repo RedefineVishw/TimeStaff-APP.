@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, powerMonitor, screen, shell, safeStorage, desktopCapturer, Notification, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, powerMonitor, screen, shell, safeStorage, desktopCapturer, Menu } from 'electron';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -10,6 +10,20 @@ import started from 'electron-squirrel-startup';
 // small always-on-top-adjacent utility window. Removing it applies to every
 // BrowserWindow the app creates (main window and the idle-alert popup).
 Menu.setApplicationMenu(null);
+
+// This app's whole job depends on timers in the renderer firing on time —
+// the live clock, the mini-timer widget's updates, and (most importantly)
+// the once-a-second idle check that drives the last-15-seconds warning.
+// Chromium deliberately throttles timers in windows it considers
+// backgrounded: minimized, hidden, or (on Windows) fully covered by other
+// windows. Throttled, the idle check runs far less often than once a
+// second, so the widget freezes, the amber/red warning gets skipped, and
+// the idle popup appears with no warning at all — then everything catches up
+// the moment the window is restored. These switches turn that off for the
+// whole process; each window also opts out individually below.
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 
 // .ico gives a sharper Windows taskbar/title-bar icon than .png at small
 // sizes; other platforms fall back to the PNG.
@@ -123,22 +137,6 @@ ipcMain.handle('capture-screenshot', async () => {
   return new Uint8Array(primarySource.thumbnail.toPNG());
 });
 
-// The web Notification API (used from the renderer) can't set a custom
-// icon on Windows — the toast falls back to Electron's own default icon
-// and app name ("Electron"), not TimeStaff's, regardless of the title/body
-// text passed in. Electron's native Notification (main process only) does
-// let us set a real icon, so screenshot-capture notifications are raised
-// from here instead.
-ipcMain.handle('notify-screenshot-captured', () => {
-  if (!Notification.isSupported()) return;
-  new Notification({
-    title: 'TimeStaff',
-    body: 'Screenshot captured.',
-    icon: WINDOW_ICON,
-    silent: true,
-  }).show();
-});
-
 let mainWindow: BrowserWindow | null = null;
 let idleAlertWindow: BrowserWindow | null = null;
 let miniTimerWindow: BrowserWindow | null = null;
@@ -176,6 +174,7 @@ const createWindow = () => {
     titleBarStyle: 'hidden',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
     },
   });
 
@@ -202,6 +201,7 @@ const createWindow = () => {
   mainWindow.on('closed', () => {
     idleAlertWindow?.close();
     miniTimerWindow?.close();
+    closeScreenshotToast();
     mainWindow = null;
   });
 
@@ -249,6 +249,7 @@ function createIdleAlertWindow() {
     backgroundColor: '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
     },
   });
   idleAlertWindow.setAlwaysOnTop(true, 'screen-saver');
@@ -293,6 +294,116 @@ ipcMain.on('idle-alert:hide', () => {
 ipcMain.on('idle-alert:respond', (_event, response: { action: 'stop' | 'resume'; wasWorking: 'no' | 'yes' }) => {
   mainWindow?.webContents.send('idle-alert:response', response);
   idleAlertWindow?.hide();
+});
+
+// --- Screenshot toast: the "screenshot captured" popup ---------------------
+// Drawn as our own small always-on-top window instead of a native OS
+// notification, because an OS toast is always placed by the OS (bottom right
+// on Windows) and an app can't move it — and the user can choose where this
+// appears (see Settings in the app). Never takes focus, so it can't steal
+// typing from whatever is being worked on — but it does take clicks, for its
+// dismiss (X) button.
+
+type ScreenshotAlertPosition =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'left-center'
+  | 'center'
+  | 'right-center'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right';
+
+// The card is 364x76 (a Windows 11 toast's size); the rest is transparent
+// breathing room so its shadow isn't clipped, which also doubles as the gap
+// from the screen edge.
+const TOAST_WIDTH = 396;
+const TOAST_HEIGHT = 108;
+const TOAST_VISIBLE_MS = 5000;
+
+let screenshotToastWindow: BrowserWindow | null = null;
+let screenshotToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function toastBounds(position: ScreenshotAlertPosition): { x: number; y: number } {
+  const wa = screen.getPrimaryDisplay().workArea;
+  const left = wa.x;
+  const right = wa.x + wa.width - TOAST_WIDTH;
+  const top = wa.y;
+  const bottom = wa.y + wa.height - TOAST_HEIGHT;
+  const centerX = Math.round(wa.x + (wa.width - TOAST_WIDTH) / 2);
+  const centerY = Math.round(wa.y + (wa.height - TOAST_HEIGHT) / 2);
+  switch (position) {
+    case 'top-left':
+      return { x: left, y: top };
+    case 'top-center':
+      return { x: centerX, y: top };
+    case 'top-right':
+      return { x: right, y: top };
+    case 'left-center':
+      return { x: left, y: centerY };
+    case 'center':
+      return { x: centerX, y: centerY };
+    case 'right-center':
+      return { x: right, y: centerY };
+    case 'bottom-left':
+      return { x: left, y: bottom };
+    case 'bottom-center':
+      return { x: centerX, y: bottom };
+    case 'bottom-right':
+    default:
+      return { x: right, y: bottom };
+  }
+}
+
+function closeScreenshotToast() {
+  if (screenshotToastTimer) clearTimeout(screenshotToastTimer);
+  screenshotToastTimer = null;
+  if (screenshotToastWindow && !screenshotToastWindow.isDestroyed()) screenshotToastWindow.close();
+  screenshotToastWindow = null;
+}
+
+ipcMain.on('screenshot-toast:dismiss', () => closeScreenshotToast());
+
+ipcMain.handle('notify-screenshot-captured', (_event, position: ScreenshotAlertPosition) => {
+  // A new screenshot while the last popup is still up replaces it (and
+  // restarts the timer) rather than stacking a second window on top.
+  closeScreenshotToast();
+
+  const { x, y } = toastBounds(position);
+  const win = new BrowserWindow({
+    width: TOAST_WIDTH,
+    height: TOAST_HEIGHT,
+    x,
+    y,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    focusable: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
+    },
+  });
+  screenshotToastWindow = win;
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.loadURL(rendererUrl('screenshot-toast'));
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
+    win.showInactive();
+    screenshotToastTimer = setTimeout(closeScreenshotToast, TOAST_VISIBLE_MS);
+  });
+  win.on('closed', () => {
+    if (screenshotToastWindow === win) screenshotToastWindow = null;
+  });
 });
 
 // --- Mini timer: a small always-on-top overlay showing whatever task is
@@ -364,6 +475,7 @@ async function createMiniTimerWindow() {
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
     },
   });
   // 'screen-saver' is the same level the idle alert uses — high enough to

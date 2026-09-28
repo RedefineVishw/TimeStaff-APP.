@@ -18,6 +18,17 @@ interface MiniTimerData {
   status: "running" | "paused" | "idle-warning" | "idle-critical";
 }
 
+type ScreenshotAlertPosition =
+  | "top-left"
+  | "top-center"
+  | "top-right"
+  | "left-center"
+  | "center"
+  | "right-center"
+  | "bottom-left"
+  | "bottom-center"
+  | "bottom-right";
+
 type MiniTimerAction = "pause" | "resume" | "dismiss";
 
 declare global {
@@ -29,7 +40,10 @@ declare global {
       getIdleSeconds: () => Promise<number>;
       openExternal: (url: string) => Promise<void>;
       captureScreenshot: () => Promise<Uint8Array>;
-      notifyScreenshotCaptured: () => Promise<void>;
+      notifyScreenshotCaptured: (position: ScreenshotAlertPosition) => Promise<void>;
+      screenshotToast: {
+        dismiss: () => void;
+      };
       auth: {
         getRefreshToken: () => Promise<string | null>;
         setRefreshToken: (token: string) => Promise<boolean>;
