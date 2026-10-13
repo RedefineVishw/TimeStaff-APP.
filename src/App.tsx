@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   apiErrorMessage,
   fetchCurrentTimer,
@@ -7,21 +7,40 @@ import {
   fetchProjectTasks,
   fetchTrackingSettings,
   isEntitlementError,
+  isTransientError,
   logout as apiLogout,
   restoreSession,
   setSessionExpiredHandler,
-  startTimer,
-  stopTimer,
-  uploadScreenshot,
   type AuthUser,
   type RunningTimeEntry,
   type Task,
 } from "./lib/api";
+import {
+  acknowledgeDropped,
+  clearOutboxUser,
+  getOutboxStatus,
+  hasPendingStop,
+  initOutbox,
+  startEntry,
+  stopEntry,
+  submitActivity,
+  submitScreenshot,
+  subscribeOutbox,
+  unsyncedRunningEntry,
+} from "./lib/outbox";
+import { loadWorkspaceCache, saveWorkspaceCache } from "./lib/workspace-cache";
 import { Login } from "./Login";
 import { SettingsPage } from "./SettingsPage";
 import { getScreenshotAlertPosition } from "./lib/settings";
 
 const WEB_DASHBOARD_URL = "http://localhost:3000";
+
+// How often accumulated keyboard/mouse activity is flushed to the backend.
+const ACTIVITY_REPORT_INTERVAL_SEC = 60;
+// How long closing the window will wait on the network to stop the timer
+// before persisting the stop and closing anyway (main.ts force-closes after
+// 3s, so this has to stay comfortably under that).
+const CLOSE_STOP_TIMEOUT_MS = 2000;
 
 interface MyTask {
   id: string;
@@ -56,6 +75,40 @@ interface ProjectGroup {
   name: string;
   todaySeconds: number;
   tasks: MyTask[];
+}
+
+// What's kept of a loaded workspace so the app can open with no network.
+interface WorkspaceData {
+  projectGroups: ProjectGroup[];
+  idleThresholdSec: number;
+  screenshotIntervalSec: number;
+}
+
+// A timer the outbox knows about but the backend may not yet — rebuilt as a
+// RunningTimeEntry (with the task/project names the UI shows) so the rest of
+// the app treats it exactly like a server-confirmed one.
+function localRunningEntry(
+  unsynced: { entryId: string; taskId: string; startedAt: string },
+  userId: string,
+  groups: ProjectGroup[],
+): RunningTimeEntry {
+  let task: RunningTimeEntry["task"];
+  for (const group of groups) {
+    const found = group.tasks.find((t) => t.id === unsynced.taskId);
+    if (found) {
+      task = { id: found.id, title: found.title, project: { id: group.id, name: group.name } };
+      break;
+    }
+  }
+  return {
+    id: unsynced.entryId,
+    taskId: unsynced.taskId,
+    userId,
+    startedAt: unsynced.startedAt,
+    endedAt: null,
+    durationSec: null,
+    task,
+  };
 }
 
 function formatClock(totalSeconds: number): string {
@@ -171,6 +224,12 @@ export function App() {
   const [sessionElapsedBaseSec, setSessionElapsedBaseSec] = useState(0);
 
   const suppressUntilActiveRef = useRef(false);
+  // Seconds observed / seconds with real input since the last activity
+  // sample was reported (see the activity-reporting effect below). Lives in
+  // a ref (not state) because it's bumped every second and nothing renders
+  // it. Independent of screenshots — works on plans without that feature.
+  const activityRef = useRef({ totalSec: 0, activeSec: 0 });
+  const lastIdleSecRef = useRef<number | null>(null);
   const idleAlertRef = useRef<IdleAlertState | null>(null);
 
   // The idle alert now lives in a genuinely separate, always-on-top OS
@@ -198,11 +257,62 @@ export function App() {
     }
   }
 
+  // Offline queue state for the status banner (see lib/outbox.ts).
+  const outboxStatus = useSyncExternalStore(subscribeOutbox, getOutboxStatus);
+
+  // Sends whatever keyboard/mouse activity has accumulated as one sample for
+  // `entry`. Takes the whole window up front (the outbox owns delivery from
+  // here, including retries), so seconds ticking in during the request just
+  // start the next window. `trimSec` drops that many trailing seconds — the
+  // idle stretch an idle-discard cuts off the entry, which must not be
+  // reported as time that was tracked.
+  async function flushActivity(
+    entry: RunningTimeEntry,
+    opts: { sampledAt?: Date; trimSec?: number; queueOnly?: boolean } = {},
+  ) {
+    if (!user) return;
+    const { totalSec, activeSec } = activityRef.current;
+    activityRef.current = { totalSec: 0, activeSec: 0 };
+    const total = totalSec - Math.min(opts.trimSec ?? 0, totalSec);
+    const active = Math.min(activeSec, total);
+    if (total < 1) return;
+    try {
+      await submitActivity({
+        userId: user.id,
+        taskId: entry.taskId,
+        entryId: entry.id,
+        activeSec: active,
+        totalSec: total,
+        sampledAt: opts.sampledAt ?? new Date(),
+        queueOnly: opts.queueOnly,
+      });
+    } catch {
+      // Activity is best-effort — never worth failing a stop over.
+    }
+  }
+
+  // The one way a running timer ends: flush its last partial activity window,
+  // then stop it — sent straight away when the backend answers, persisted
+  // and replayed later when it doesn't (the same endedAt either way, so
+  // offline time is never lost or stretched).
+  async function finishRunningEntry(
+    entry: RunningTimeEntry,
+    opts: { endedAt?: Date; trimSec?: number; forClose?: boolean } = {},
+  ) {
+    if (!user) throw new Error("Not signed in");
+    const endedAt = opts.endedAt ?? new Date();
+    await flushActivity(entry, { sampledAt: endedAt, trimSec: opts.trimSec, queueOnly: opts.forClose });
+    return stopEntry(user.id, entry.id, endedAt, opts.forClose ? { timeoutMs: CLOSE_STOP_TIMEOUT_MS } : {});
+  }
+
   // A session-expired 401 (refresh also failed) drops back to the login
   // screen — wired once, module-level, since lib/api.ts has no React state
   // of its own.
   useEffect(() => {
     setSessionExpiredHandler(() => {
+      // Queued work stays on disk for when they sign back in; it just can't
+      // be sent without a session, and retrying it in a loop helps no one.
+      clearOutboxUser();
       setUser(null);
       setRunning(null);
       setProjectGroups([]);
@@ -212,25 +322,62 @@ export function App() {
   useEffect(() => {
     (async () => {
       const restoredUser = await restoreSession();
-      if (restoredUser) {
+      if (restoredUser === "offline") {
+        // Signed in on this machine but the backend can't be reached to
+        // confirm it — open from the last workspace snapshot so tracking
+        // still works; everything queues until the connection is back.
+        const cached = await loadWorkspaceCache<WorkspaceData>();
+        if (cached) {
+          setUser(cached.user);
+          await applyCachedWorkspace(cached.user, cached.data);
+        }
+      } else if (restoredUser) {
         setUser(restoredUser);
-        await loadWorkspace(restoredUser);
+        await loadWorkspace(restoredUser, { allowCache: true });
       }
       setBootstrapping(false);
     })();
   }, []);
 
-  async function loadWorkspace(currentUser: AuthUser) {
+  // Shows a previously saved workspace (see lib/workspace-cache.ts). What's
+  // running is never taken from the snapshot — only from the outbox, which
+  // knows about any timer started offline that the backend hasn't seen.
+  async function applyCachedWorkspace(cachedUser: AuthUser, data: WorkspaceData) {
+    await initOutbox(cachedUser.id);
+    const unsynced = unsyncedRunningEntry(cachedUser.id);
+    const entry = unsynced ? localRunningEntry(unsynced, cachedUser.id, data.projectGroups) : null;
+    setProjectGroups(data.projectGroups);
+    setIdleThresholdSec(data.idleThresholdSec);
+    setScreenshotIntervalSec(data.screenshotIntervalSec);
+    setRunning(entry);
+    const runningProjectId = entry
+      ? data.projectGroups.find((g) => g.tasks.some((t) => t.id === entry.taskId))?.id
+      : null;
+    setSelectedProjectId(runningProjectId ?? data.projectGroups[0]?.id ?? null);
+  }
+
+  async function loadWorkspace(currentUser: AuthUser, opts: { allowCache?: boolean } = {}) {
     setLoadingWorkspace(true);
     setError(null);
     try {
+      // Makes sure queued offline work is loaded (and syncing) before we
+      // decide what's running — idempotent, safe on every refresh.
+      await initOutbox(currentUser.id);
       const todayStart = startOfToday();
-      const [projects, current, todayEntries] = await Promise.all([
+      const [projects, serverCurrent, todayEntries] = await Promise.all([
         fetchProjects(),
         fetchCurrentTimer(),
         fetchMyTimeEntries(todayStart.toISOString(), new Date().toISOString()),
       ]);
       const activeProjects = projects.filter((p) => p.status === "ACTIVE");
+
+      // The backend can be a step behind the outbox in both directions: a
+      // timer started offline it hasn't seen yet (local one wins — it's
+      // newer), and a timer it still shows as running whose stop is queued.
+      const unsynced = unsyncedRunningEntry(currentUser.id);
+      const serverStillRunning =
+        serverCurrent && !hasPendingStop(currentUser.id, serverCurrent.id) ? serverCurrent : null;
+      const currentTaskId = unsynced?.taskId ?? serverStillRunning?.taskId ?? null;
 
       const secondsByTask = new Map<string, number>();
       for (const entry of todayEntries) {
@@ -252,7 +399,7 @@ export function App() {
         // never disappears out from under the user mid-session.
         const myLeafTasks = flattenLeafTasks(tasksPerProject[i]).filter((t) => {
           if (t.assigneeId !== currentUser.id) return false;
-          if (t.id === current?.taskId) return true;
+          if (t.id === currentTaskId) return true;
           return t.status === "IN_PROGRESS" && !hasNotStartedYet(t.startDate);
         });
         if (myLeafTasks.length === 0) return;
@@ -271,6 +418,9 @@ export function App() {
           tasks,
         });
       });
+      const current: RunningTimeEntry | null = unsynced
+        ? localRunningEntry(unsynced, currentUser.id, groups)
+        : serverStillRunning;
       setProjectGroups(groups);
       setRunning(current);
 
@@ -279,16 +429,38 @@ export function App() {
       const runningProjectId = current ? groups.find((g) => g.tasks.some((t) => t.id === current.taskId))?.id : null;
       setSelectedProjectId(runningProjectId ?? groups[0]?.id ?? null);
 
+      let nextIdleThresholdSec = idleThresholdSec;
+      let nextScreenshotIntervalSec = screenshotIntervalSec;
       if (currentUser.organizationId) {
         const settings = await fetchTrackingSettings(currentUser.organizationId).catch(() => null);
         if (settings) {
+          nextIdleThresholdSec = settings.idleThresholdSec;
+          nextScreenshotIntervalSec = settings.screenshotIntervalSec;
           setIdleThresholdSec(settings.idleThresholdSec);
           setScreenshotIntervalSec(settings.screenshotIntervalSec);
         }
       }
       setLastUpdatedAt(new Date());
+
+      // Keep an offline copy for the next time the backend isn't there.
+      void saveWorkspaceCache<WorkspaceData>(currentUser, {
+        projectGroups: groups,
+        idleThresholdSec: nextIdleThresholdSec,
+        screenshotIntervalSec: nextScreenshotIntervalSec,
+      });
     } catch (err) {
-      setError(apiErrorMessage(err, "Couldn't reach the TimeStaff backend at localhost:5000."));
+      // Start-up with no connection: fall back to the last snapshot instead
+      // of an error screen with nothing to track on. (A manual Refresh never
+      // does this — swapping in an older snapshot would throw away the
+      // totals folded in locally since.)
+      if (opts.allowCache && isTransientError(err)) {
+        const cached = await loadWorkspaceCache<WorkspaceData>(currentUser.id);
+        if (cached) {
+          await applyCachedWorkspace(currentUser, cached.data);
+          return;
+        }
+      }
+      setError(apiErrorMessage(err, "Couldn't reach the TimeStaff backend."));
     } finally {
       setLoadingWorkspace(false);
     }
@@ -342,12 +514,15 @@ export function App() {
   async function handleLogout() {
     if (running) {
       try {
-        await stopTimer(running.id);
+        await finishRunningEntry(running);
       } catch {
         // Best-effort — logging out regardless.
       }
     }
     await apiLogout();
+    // Anything still queued stays on disk and syncs when this user signs
+    // back in; it just can't be sent without a session.
+    clearOutboxUser();
     setUser(null);
     setRunning(null);
     setProjectGroups([]);
@@ -378,6 +553,16 @@ export function App() {
       // below). No timeout, no auto-close: it stays on screen for as long
       // as it takes, even if that's a very long time.
       if (idleAlertRef.current) return;
+
+      // Activity sampling: OS idle time resets to 0 on any keyboard/mouse
+      // input and counts up otherwise, so "idle time is 0 or went down since
+      // the last poll" means there was input this second. Only the fact of
+      // input is observed — never which keys or where.
+      const lastIdleSec = lastIdleSecRef.current;
+      const hadInput = idleSeconds === 0 || (lastIdleSec !== null && idleSeconds < lastIdleSec);
+      lastIdleSecRef.current = idleSeconds;
+      activityRef.current.totalSec += 1;
+      if (hadInput) activityRef.current.activeSec += 1;
 
       if (idleSeconds < 5) suppressUntilActiveRef.current = false;
 
@@ -437,9 +622,11 @@ export function App() {
 
     let entitlementDenied = false;
     const taskId = running.taskId;
+    const entryId = running.id;
+    const userId = user?.id;
 
     const interval = setInterval(async () => {
-      if (entitlementDenied) return;
+      if (entitlementDenied || !userId) return;
       // Don't capture while the idle dialog is up — the user isn't
       // confirmed to be working during this stretch, so there's nothing
       // meaningful to screenshot yet (and if discarded, the interval this
@@ -448,8 +635,9 @@ export function App() {
       if (idleAlertRef.current) return;
       try {
         const bytes = await window.timeStaff.captureScreenshot();
-        const blob = new Blob([bytes], { type: "image/png" });
-        await uploadScreenshot(taskId, blob);
+        // Uploaded now if the backend answers, otherwise saved to disk and
+        // sent later against this entry with its real capture time.
+        await submitScreenshot({ userId, taskId, entryId, bytes });
         // Read fresh each time (not captured when the timer started) so a
         // position picked in Settings applies to the very next screenshot.
         window.timeStaff.notifyScreenshotCaptured(getScreenshotAlertPosition());
@@ -459,13 +647,36 @@ export function App() {
           // failing silently on every interval for the rest of the session.
           entitlementDenied = true;
         }
-        // Any other failure (transient network blip, etc.) just tries again
-        // next interval — a single missed screenshot isn't worth surfacing.
+        // Any other failure just tries again next interval — a single
+        // missed screenshot isn't worth surfacing.
       }
     }, screenshotIntervalSec * 1000);
 
     return () => clearInterval(interval);
-  }, [running, screenshotIntervalSec]);
+  }, [running, screenshotIntervalSec, user?.id]);
+
+  // Activity reporting — deliberately its own timer, independent of
+  // screenshots (different interval, no plan entitlement), so activity data
+  // exists for every org that tracks time. The counters themselves are
+  // filled by the idle poll above; this just flushes them every minute.
+  useEffect(() => {
+    if (!running) return;
+
+    const entry = running;
+    // A new timer starts a fresh window — don't let seconds from a previous
+    // task/session bleed into this one's first sample.
+    activityRef.current = { totalSec: 0, activeSec: 0 };
+    lastIdleSecRef.current = null;
+
+    // Delivery (retries, surviving an offline stretch or a restart) is the
+    // outbox's job — this only hands it each minute's window.
+    const interval = setInterval(() => {
+      void flushActivity(entry);
+    }, ACTIVITY_REPORT_INTERVAL_SEC * 1000);
+
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running?.id, user?.id]);
 
   // Shows the mini-timer widget whenever a genuinely new/different entry
   // starts running — covers handleSwitchTask, handleMiniTimerResume, and
@@ -494,14 +705,17 @@ export function App() {
     return window.timeStaff.onBeforeClose(async () => {
       if (running) {
         try {
-          await stopTimer(running.id);
+          // Waits only briefly on the network: if the stop can't land in
+          // time it's already persisted to disk, and goes out with the
+          // right end time the next time the app syncs.
+          await finishRunningEntry(running, { forClose: true });
         } catch {
           // Best-effort — the window is closing regardless.
         }
       }
       window.timeStaff.confirmReadyToClose();
     });
-  }, [running]);
+  }, [running, user]);
 
   // The floating mini-timer widget's pause/resume button has no logic of
   // its own — reported back through main exactly like the idle-alert
@@ -528,7 +742,7 @@ export function App() {
     const taskId = running.taskId;
     const fallbackTask = running.task;
     try {
-      await stopTimer(running.id);
+      await finishRunningEntry(running);
       foldElapsedIntoTask(taskId, elapsedSeconds);
       const taskInfo = findTaskInfo(projectGroups, taskId);
       const paused = {
@@ -561,11 +775,11 @@ export function App() {
   // and the displayed total stays correct because the paused segment is
   // already folded into the task's todaySeconds.
   async function handleMiniTimerResume() {
-    if (!pausedTask) return;
+    if (!pausedTask || !user) return;
     setBusy(true);
     setError(null);
     try {
-      const entry = await startTimer(pausedTask.id);
+      const { entry } = await startEntry(user.id, pausedTask.id);
       setRunning(entry);
       setSessionElapsedBaseSec(0);
       setPausedTask(null);
@@ -580,7 +794,9 @@ export function App() {
     if (!running) return;
     const idleSince = new Date(Date.now() - idleSeconds * 1000);
     try {
-      await stopTimer(running.id, idleSince.toISOString());
+      // Cut at idleSince; the idle seconds are also trimmed off the last
+      // activity window so they aren't reported as tracked time.
+      await finishRunningEntry(running, { endedAt: idleSince, trimSec: idleSeconds });
     } catch {
       // Nothing more we can do here — leave it to the user to stop manually.
     }
@@ -605,7 +821,7 @@ export function App() {
     setIdleAlertBoth(null);
     if (wasWorking === "yes") {
       try {
-        await stopTimer(running.id);
+        await finishRunningEntry(running);
       } catch {
         // Leave it to the user to stop manually if this failed.
       }
@@ -657,8 +873,8 @@ export function App() {
     setBusy(true);
     const idleSince = new Date(alert.shownAt - alert.idleSeconds * 1000);
     try {
-      await stopTimer(running.id, idleSince.toISOString());
-      const newEntry = await startTimer(running.taskId);
+      await finishRunningEntry(running, { endedAt: idleSince, trimSec: alert.idleSeconds });
+      const { entry: newEntry } = await startEntry(user!.id, running.taskId);
       setSessionElapsedBaseSec(alert.frozenElapsedSec);
       setElapsedSeconds(alert.frozenElapsedSec);
       setRunning(newEntry);
@@ -700,11 +916,15 @@ export function App() {
     if (running) {
       foldElapsedIntoTask(running.taskId, elapsedSeconds);
     }
+    if (!user) return;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const entry = await startTimer(taskId);
+      // The old entry's last partial activity window belongs to it, not to
+      // the task about to start — send it first.
+      if (running) await flushActivity(running);
+      const { entry } = await startEntry(user.id, taskId);
       setRunning(entry);
       setSessionElapsedBaseSec(0);
       // Starting a genuinely different task while something else was
@@ -723,7 +943,7 @@ export function App() {
     setBusy(true);
     setError(null);
     try {
-      await stopTimer(running.id);
+      await finishRunningEntry(running);
       foldElapsedIntoTask(running.taskId, elapsedSeconds);
       setRunning(null);
       setElapsedSeconds(0);
@@ -896,6 +1116,28 @@ export function App() {
         </aside>
 
         <main className="main-content">
+          {!outboxStatus.reachable && (
+            <p className="banner offline">
+              You&apos;re offline — your timer keeps running and everything is saved on this computer. It syncs
+              automatically when the connection is back
+              {outboxStatus.pending > 0 ? ` (${outboxStatus.pending} waiting).` : "."}
+            </p>
+          )}
+          {outboxStatus.reachable && outboxStatus.pending > 0 && (
+            <p className="banner syncing">
+              {outboxStatus.syncing ? "Syncing" : "Waiting to sync"} {outboxStatus.pending} saved{" "}
+              {outboxStatus.pending === 1 ? "item" : "items"}…
+            </p>
+          )}
+          {outboxStatus.dropped > 0 && (
+            <p className="banner error">
+              {outboxStatus.dropped} saved {outboxStatus.dropped === 1 ? "item" : "items"} couldn&apos;t be accepted by
+              the server and {outboxStatus.dropped === 1 ? "was" : "were"} discarded.
+              <button type="button" className="banner-dismiss" onClick={acknowledgeDropped}>
+                Dismiss
+              </button>
+            </p>
+          )}
           {error && <p className="banner error">{error}</p>}
           {notice && <p className="banner notice">{notice}</p>}
 

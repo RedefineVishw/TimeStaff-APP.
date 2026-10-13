@@ -109,6 +109,63 @@ ipcMain.handle('auth:clear-refresh-token', async () => {
   }
 });
 
+// --- Offline storage -------------------------------------------------------
+// The renderer's outbox (queued timer starts/stops, screenshots, activity —
+// see lib/outbox.ts) and its last-known workspace snapshot have to survive
+// the app being closed or crashing while offline, so they live on disk under
+// the per-user app data directory. The renderer owns what's in them; main
+// only moves bytes. Writes go to a temp file and are renamed into place, so
+// a crash mid-write can never leave a half-written (unparseable) outbox.
+const OUTBOX_FILE = () => path.join(app.getPath('userData'), 'outbox.json');
+const WORKSPACE_CACHE_FILE = () => path.join(app.getPath('userData'), 'workspace-cache.json');
+const OUTBOX_BLOB_DIR = () => path.join(app.getPath('userData'), 'outbox-screenshots');
+
+async function readTextOrNull(file: string): Promise<string | null> {
+  try {
+    return await fs.readFile(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+async function writeTextAtomic(file: string, contents: string) {
+  const tmp = `${file}.tmp`;
+  await fs.writeFile(tmp, contents, 'utf8');
+  await fs.rename(tmp, file);
+}
+
+// Blob ids come from the renderer — constrain them so a bad id can never
+// escape the outbox directory.
+function blobPath(id: string): string {
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) throw new Error('Invalid blob id');
+  return path.join(OUTBOX_BLOB_DIR(), `${id}.png`);
+}
+
+ipcMain.handle('storage:load-outbox', () => readTextOrNull(OUTBOX_FILE()));
+ipcMain.handle('storage:save-outbox', (_event, json: string) => writeTextAtomic(OUTBOX_FILE(), json));
+ipcMain.handle('storage:load-workspace-cache', () => readTextOrNull(WORKSPACE_CACHE_FILE()));
+ipcMain.handle('storage:save-workspace-cache', (_event, json: string) =>
+  writeTextAtomic(WORKSPACE_CACHE_FILE(), json),
+);
+ipcMain.handle('storage:write-blob', async (_event, id: string, bytes: Uint8Array) => {
+  await fs.mkdir(OUTBOX_BLOB_DIR(), { recursive: true });
+  await fs.writeFile(blobPath(id), bytes);
+});
+ipcMain.handle('storage:read-blob', async (_event, id: string) => {
+  try {
+    return new Uint8Array(await fs.readFile(blobPath(id)));
+  } catch {
+    return null;
+  }
+});
+ipcMain.handle('storage:delete-blob', async (_event, id: string) => {
+  try {
+    await fs.unlink(blobPath(id));
+  } catch {
+    // Already gone — fine.
+  }
+});
+
 // The actual pixel capture needs real OS access (main process only) — the
 // renderer can't touch the screen directly even with Node integration off.
 // Everything else (upload, retry/backoff on failure, the notification) is

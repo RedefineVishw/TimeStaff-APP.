@@ -44,6 +44,15 @@ declare global {
       screenshotToast: {
         dismiss: () => void;
       };
+      storage: {
+        loadOutbox: () => Promise<string | null>;
+        saveOutbox: (json: string) => Promise<void>;
+        loadWorkspaceCache: () => Promise<string | null>;
+        saveWorkspaceCache: (json: string) => Promise<void>;
+        writeBlob: (id: string, bytes: Uint8Array) => Promise<void>;
+        readBlob: (id: string) => Promise<Uint8Array | null>;
+        deleteBlob: (id: string) => Promise<void>;
+      };
       auth: {
         getRefreshToken: () => Promise<string | null>;
         setRefreshToken: (token: string) => Promise<boolean>;

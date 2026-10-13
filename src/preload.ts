@@ -56,6 +56,17 @@ contextBridge.exposeInMainWorld('timeStaff', {
   screenshotToast: {
     dismiss: () => ipcRenderer.send('screenshot-toast:dismiss'),
   },
+  // Disk storage for the offline outbox and workspace snapshot (see
+  // lib/outbox.ts and lib/workspace-cache.ts) — main just moves bytes.
+  storage: {
+    loadOutbox: (): Promise<string | null> => ipcRenderer.invoke('storage:load-outbox'),
+    saveOutbox: (json: string): Promise<void> => ipcRenderer.invoke('storage:save-outbox', json),
+    loadWorkspaceCache: (): Promise<string | null> => ipcRenderer.invoke('storage:load-workspace-cache'),
+    saveWorkspaceCache: (json: string): Promise<void> => ipcRenderer.invoke('storage:save-workspace-cache', json),
+    writeBlob: (id: string, bytes: Uint8Array): Promise<void> => ipcRenderer.invoke('storage:write-blob', id, bytes),
+    readBlob: (id: string): Promise<Uint8Array | null> => ipcRenderer.invoke('storage:read-blob', id),
+    deleteBlob: (id: string): Promise<void> => ipcRenderer.invoke('storage:delete-blob', id),
+  },
   auth: {
     getRefreshToken: (): Promise<string | null> => ipcRenderer.invoke('auth:get-refresh-token'),
     setRefreshToken: (token: string): Promise<boolean> => ipcRenderer.invoke('auth:set-refresh-token', token),
